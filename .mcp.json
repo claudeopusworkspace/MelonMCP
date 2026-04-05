@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "melonds": {
+      "command": "/workspace/MelonMCP/.venv/bin/python",
+      "args": ["-m", "melonds_mcp"],
+      "cwd": "/workspace/MelonMCP"
+    }
+  }
+}
