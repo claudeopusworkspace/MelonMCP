@@ -4,62 +4,67 @@ Port of the DeSmuME MCP server to melonDS for JIT-enabled DS emulation.
 
 ## Status
 
-**Not yet started.** This project exists to hold research and planning for a future port of `/workspace/DesmumeMCP` to use melonDS as its emulation backend. Development on DesmumeMCP should be paused during active work here to keep the port in sync.
+**Core port complete.** The C shim, ctypes wrapper, and all Python layers have been ported. JIT is confirmed working. 76 unit tests passing.
+
+### What's done
+- `shim/melonds_shim.cpp` — extern "C" wrapper (lifecycle, display, input, savestates, memory, audio, save data, JIT)
+- `shim/platform_stubs.cpp` — Platform.h implementations (file I/O, threading, logging, save callbacks, no-op multimedia stubs)
+- `shim/CMakeLists.txt` — builds `libmelonds.so` linking melonDS core as static lib
+- `melonds_mcp/` — full Python package (14 modules: libmelonds, emulator, server, bridge, client, journal, renderer, streamer, viewer, constants, settings, __main__)
+- `tests/` — 76 tests passing (constants, checkpoints, macros, watches)
+- Build automation (`scripts/build_libmelonds.sh`)
+
+### What's not done yet
+- End-to-end testing with a real ROM
+- HLS streaming verification
+- Investigate Woj's previously observed image artifacting
 
 ## Motivation
 
 DeSmuME's x86 JIT is disabled by default and documented as buggy (unmaintained since ~2014, with known Pokemon-specific crashes). melonDS has a mature, stable JIT recompiler that's on by default for x64, offering substantial performance gains.
 
-## Architecture Plan
-
-The DeSmuME MCP stack is layered:
+## Architecture
 
 ```
-MCP tools (server.py)  →  EmulatorState (emulator.py)  →  ctypes wrapper (libdesmume.py)  →  libdesmume.so
+MCP tools (server.py)  →  EmulatorState (emulator.py)  →  ctypes wrapper (libmelonds.py)  →  libmelonds.so
 Bridge (bridge.py)  ↗       ↑ Journal (journal.py) → Renderer (renderer.py)
 ```
 
-Only the bottom layer needs replacing:
-1. **C shim** — `extern "C"` wrapper around melonDS's `NDS` C++ class → `libmelonds.so`
-2. **Python ctypes wrapper** — `libmelonds.py` replacing `libdesmume.py`
-3. **Everything above** — `emulator.py`, `server.py`, `bridge.py`, `journal.py`, `renderer.py`, `streamer.py`, `viewer.py` — ports with minimal changes
+The C shim (`shim/melonds_shim.cpp`) wraps the melonDS `NDS` C++ class as a flat C API. Platform callbacks (`shim/platform_stubs.cpp`) provide file I/O, threading, and save data persistence.
 
-## melonDS Core API (NDS class, src/NDS.h)
-
-Key methods that map to our interface:
-
-| melonDS (NDS class) | DeSmuME equivalent | Notes |
-|---|---|---|
-| `NDS(NDSArgs&&)` | `desmume_init()` | Constructor, takes config args |
-| `Reset()` | `desmume_reset()` | |
-| `Start()` / `Stop()` | `desmume_resume()` / `desmume_pause()` | |
-| `RunFrame()` | `desmume_cycle()` | Single frame advance |
-| `SetKeyMask(u32)` | `desmume_input_keypad_update()` | |
-| `TouchScreen(x, y)` | `desmume_input_set_touch_pos()` | |
-| `ReleaseScreen()` | `desmume_input_release_touch()` | |
-| `ARM9Read8/16/32(addr)` | `desmume_memory_read_byte/short/long()` | |
-| `ARM9Write8/16/32(addr, val)` | `desmume_memory_write_byte/short/long()` | |
-| `DoSavestate(Savestate*)` | `desmume_savestate_save/load()` | Single method, bidirectional |
-| `IsJITEnabled()` / `SetJITArgs()` | N/A (no DeSmuME equivalent) | JIT control |
-
-## Build Requirements
+## Build
 
 ```bash
-# melonDS core only (no Qt GUI):
-cmake -B build -DBUILD_QT_SDL=OFF -DENABLE_JIT=ON
-cmake --build build
+# Clone melonDS source (if not present):
+git clone --depth 1 https://github.com/melonDS-emu/melonDS.git melonds-src
+
+# Build libmelonds.so:
+./scripts/build_libmelonds.sh
+
+# Setup Python env:
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# Run tests:
+.venv/bin/python -m pytest tests/ -v
 ```
 
-## Platform.h Stubs
+## Key Differences from DeSmuME
 
-melonDS requires ~12 Platform.h callbacks for headless operation:
-- File I/O (open, read, write local files for BIOS/firmware/saves)
-- Logging
-- Threading primitives
-- Most multimedia callbacks (camera, mic, networking) can be no-ops
+- **JIT enabled by default** — the whole reason for this port
+- **No SDL dependency** — melonDS core doesn't need SDL
+- **Audio at 48kHz** (was 44.1kHz) — cleaner 800 samples/frame
+- **BGRA framebuffer** — SoftRenderer outputs BGRA, shim converts to RGB24
+- **Input bitmask inversion** — melonDS uses 1=released (DS hardware convention), shim bridges to 1=pressed (Python convention)
+- **Memory savestates** — melonDS savestates are in-memory buffers, shim handles file I/O
+- **No movie support** — dropped from tools (melonDS has no built-in movie recording)
+- **No volume/language control** — dropped from tools
+- **Save data via Platform callback** — `WriteNDSSave` auto-writes `.sav` files
 
-## Known Concerns
+## Run as MCP Server
 
-- Woj previously observed image artifacting in melonDS GUI — needs investigation (may be renderer-specific, not core issue)
-- melonDS uses OpenGL/Vulkan for its software renderer output in GUI mode; headless raw framebuffer access needs verification
-- GPLv3 license (same as DeSmuME)
+```bash
+.venv/bin/python -m melonds_mcp
+```
+
+Or configure in your MCP client's settings.

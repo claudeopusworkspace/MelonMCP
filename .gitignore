@@ -1,7 +1,39 @@
+# Python
 .venv/
-build/
 __pycache__/
 *.pyc
-*.so
+*.pyo
 *.egg-info/
+dist/
+
+# Build output
+build/
+*.so
+*.o
+*.a
+
+# melonDS source (cloned, not committed)
+melonds-src/
+
+# ROMs
 *.nds
+
+# Runtime data
+savestates/
+checkpoints/
+screenshots/
+snapshots/
+macros/
+watches/
+
+# Logs
+*.log
+
+# Settings (user-local)
+settings.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
