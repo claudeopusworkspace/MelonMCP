@@ -311,10 +311,21 @@ class EmulatorState:
         touch_x: int | None = None,
         touch_y: int | None = None,
     ) -> int:
-        """Advance multiple frames holding the same input. Returns frames advanced."""
+        """Advance multiple frames holding the same input. Returns frames advanced.
+
+        When count > 1, GPU rendering is skipped on intermediate frames for
+        performance. Only the final frame is fully rendered.
+        """
+        emu = self._require_rom()
         t0 = time.monotonic()
-        for _ in range(count):
-            self.advance_frame(buttons, touch_x, touch_y)
+        if count > 1:
+            emu.set_skip_render(True)
+            try:
+                for _ in range(count - 1):
+                    self.advance_frame(buttons, touch_x, touch_y)
+            finally:
+                emu.set_skip_render(False)
+        self.advance_frame(buttons, touch_x, touch_y)
         elapsed = time.monotonic() - t0
         self._notify_frame_change()
         if count > 1:

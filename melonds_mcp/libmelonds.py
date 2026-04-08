@@ -170,6 +170,13 @@ class MelonDS:
         lib.melonds_backup_export.argtypes = [ctypes.c_char_p]
         lib.melonds_backup_export.restype = ctypes.c_int
 
+        # ── Render skipping ──
+        lib.melonds_set_skip_render.argtypes = [ctypes.c_int]
+        lib.melonds_set_skip_render.restype = None
+
+        lib.melonds_get_skip_render.argtypes = []
+        lib.melonds_get_skip_render.restype = ctypes.c_int
+
         # ── JIT ──
         lib.melonds_jit_enabled.argtypes = []
         lib.melonds_jit_enabled.restype = ctypes.c_int
@@ -320,6 +327,16 @@ class MelonDS:
             self._audio_buf,
             ctypes.POINTER(ctypes.c_char * (count * 4)),
         ).contents)
+
+    # ── Render skipping ──
+
+    def set_skip_render(self, skip: bool) -> None:
+        """Enable or disable GPU render skipping for bulk frame advances."""
+        self._lib.melonds_set_skip_render(1 if skip else 0)
+
+    def get_skip_render(self) -> bool:
+        """Return whether GPU render skipping is currently enabled."""
+        return bool(self._lib.melonds_get_skip_render())
 
     # ── JIT ──
 

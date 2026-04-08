@@ -416,6 +416,20 @@ int melonds_backup_export(const char* filename)
     return write_file(filename, data, len) ? 1 : 0;
 }
 
+// ── Render skipping ──
+
+void melonds_set_skip_render(int skip)
+{
+    if (!g_nds) return;
+    g_nds->GPU.SkipRender = (skip != 0);
+}
+
+int melonds_get_skip_render(void)
+{
+    if (!g_nds) return 0;
+    return g_nds->GPU.SkipRender ? 1 : 0;
+}
+
 // ── JIT ──
 
 int melonds_jit_enabled(void)
