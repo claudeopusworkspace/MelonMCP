@@ -1,0 +1,4 @@
+[submodule "melonds-src"]
+	path = melonds-src
+	url = https://github.com/claudeopusworkspace/melonDS.git
+	branch = feat/skip-render

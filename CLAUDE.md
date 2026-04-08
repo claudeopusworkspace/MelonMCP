@@ -35,8 +35,8 @@ The C shim (`shim/melonds_shim.cpp`) wraps the melonDS `NDS` C++ class as a flat
 ## Build
 
 ```bash
-# Clone our melonDS fork (if not present):
-git clone -b feat/skip-render https://github.com/claudeopusworkspace/melonDS.git melonds-src
+# Initialize melonDS submodule (if not present):
+git submodule update --init
 
 # Build libmelonds.so:
 ./scripts/build_libmelonds.sh

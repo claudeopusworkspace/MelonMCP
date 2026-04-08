@@ -12,9 +12,6 @@ build/
 *.o
 *.a
 
-# melonDS source (cloned, not committed)
-melonds-src/
-
 # ROMs
 *.nds
 
