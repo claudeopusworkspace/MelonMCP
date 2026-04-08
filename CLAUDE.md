@@ -35,8 +35,8 @@ The C shim (`shim/melonds_shim.cpp`) wraps the melonDS `NDS` C++ class as a flat
 ## Build
 
 ```bash
-# Clone melonDS source (if not present):
-git clone --depth 1 https://github.com/melonDS-emu/melonDS.git melonds-src
+# Clone our melonDS fork (if not present):
+git clone -b feat/skip-render https://github.com/claudeopusworkspace/melonDS.git melonds-src
 
 # Build libmelonds.so:
 ./scripts/build_libmelonds.sh
@@ -57,6 +57,7 @@ python3 -m venv .venv
 - **BGRA framebuffer** — SoftRenderer outputs BGRA, shim converts to RGB24
 - **Input bitmask inversion** — melonDS uses 1=released (DS hardware convention), shim bridges to 1=pressed (Python convention)
 - **Memory savestates** — melonDS savestates are in-memory buffers, shim handles file I/O
+- **GPU render skipping** — our fork adds `GPU.SkipRender` flag; `advance_frames()` skips pixel rendering on intermediate frames, only rendering the final frame
 - **No movie support** — dropped from tools (melonDS has no built-in movie recording)
 - **No volume/language control** — dropped from tools
 - **Save data via Platform callback** — `WriteNDSSave` auto-writes `.sav` files
