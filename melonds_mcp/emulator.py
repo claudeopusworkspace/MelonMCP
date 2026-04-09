@@ -50,6 +50,43 @@ class CheckpointManager:
         self._dir.mkdir(exist_ok=True)
         self._ring: deque[Checkpoint] = deque(maxlen=self.MAX_CHECKPOINTS)
         self._counter = 0
+        self._recover_existing()
+
+    def _recover_existing(self) -> None:
+        """Scan for checkpoint files from previous sessions.
+
+        Populates the deque with the newest MAX_CHECKPOINTS files and
+        deletes any orphaned files beyond the cap.
+        """
+        existing = sorted(self._dir.glob("*.mst"), key=lambda p: p.stat().st_mtime)
+        if not existing:
+            return
+
+        # Delete orphans beyond the cap (oldest first, keep newest)
+        orphans = existing[: len(existing) - self.MAX_CHECKPOINTS]
+        for p in orphans:
+            p.unlink(missing_ok=True)
+            logger.info("Deleted orphaned checkpoint: %s", p.name)
+
+        if orphans:
+            logger.info(
+                "Cleaned up %d orphaned checkpoint files from previous sessions",
+                len(orphans),
+            )
+
+        # Populate deque with the survivors
+        kept = existing[len(orphans):]
+        for p in kept:
+            stat = p.stat()
+            cp = Checkpoint(
+                id=p.stem,
+                frame=0,
+                action="recovered",
+                timestamp=stat.st_mtime,
+                path=str(p),
+            )
+            self._ring.append(cp)
+        self._counter = len(kept)
 
     def create(self, emu: MelonDS, frame_count: int, action: str) -> Checkpoint:
         """Save the current emulator state as a checkpoint before an action."""

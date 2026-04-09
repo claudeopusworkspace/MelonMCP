@@ -94,6 +94,76 @@ class TestCheckpointManager:
             ids.add(cp.id)
         assert len(ids) == 50
 
+    def test_recover_existing_files(self, tmp_dir):
+        """On init, existing .mst files are loaded into the deque."""
+        tmp_dir.mkdir(exist_ok=True)
+        # Create some fake checkpoint files with staggered mtimes
+        for i in range(3):
+            p = tmp_dir / f"abc{i:05d}.mst"
+            p.write_bytes(b"fake-savestate")
+            # Stagger mtime so sort order is deterministic
+            import os
+            os.utime(p, (1000 + i, 1000 + i))
+
+        mgr = CheckpointManager(tmp_dir)
+        assert mgr.total_count == 3
+        ids = [cp.id for cp in mgr.list_recent()]
+        assert ids == ["abc00000", "abc00001", "abc00002"]
+        # All recovered checkpoints have action="recovered"
+        for cp in mgr.list_recent():
+            assert cp.action == "recovered"
+
+    def test_recover_deletes_orphans_beyond_cap(self, tmp_dir):
+        """Files beyond MAX_CHECKPOINTS are deleted on init."""
+        tmp_dir.mkdir(exist_ok=True)
+        # Create more files than the cap (use a small cap via subclass)
+        import os
+
+        class SmallCap(CheckpointManager):
+            MAX_CHECKPOINTS = 3
+
+        for i in range(5):
+            p = tmp_dir / f"file{i:05d}.mst"
+            p.write_bytes(b"fake-savestate")
+            os.utime(p, (1000 + i, 1000 + i))
+
+        mgr = SmallCap(tmp_dir)
+        # Only the 3 newest should survive
+        assert mgr.total_count == 3
+        ids = [cp.id for cp in mgr.list_recent()]
+        assert ids == ["file00002", "file00003", "file00004"]
+        # Orphaned files should be deleted from disk
+        assert not (tmp_dir / "file00000.mst").exists()
+        assert not (tmp_dir / "file00001.mst").exists()
+        assert (tmp_dir / "file00002.mst").exists()
+
+    def test_recover_empty_dir(self, tmp_dir):
+        """Empty checkpoint dir is handled gracefully."""
+        mgr = CheckpointManager(tmp_dir)
+        assert mgr.total_count == 0
+
+    def test_recover_then_create_evicts_recovered(self, tmp_dir, mock_emu):
+        """Recovered checkpoints are properly evicted when new ones are created."""
+        tmp_dir.mkdir(exist_ok=True)
+        import os
+        from collections import deque
+
+        for i in range(3):
+            p = tmp_dir / f"old{i:05d}.mst"
+            p.write_bytes(b"fake-savestate")
+            os.utime(p, (1000 + i, 1000 + i))
+
+        mgr = CheckpointManager(tmp_dir)
+        # Shrink cap to test eviction of recovered entries
+        mgr._ring = deque(mgr._ring, maxlen=3)
+
+        cp_new = mgr.create(mock_emu, 999, "press: a")
+        # Oldest recovered checkpoint should have been evicted and file deleted
+        assert not (tmp_dir / "old00000.mst").exists()
+        assert mgr.total_count == 3
+        assert mgr.get("old00000") is None
+        assert mgr.get(cp_new.id) is cp_new
+
     def test_ring_buffer_evicts_oldest(self, tmp_dir, mock_emu):
         from collections import deque
 
