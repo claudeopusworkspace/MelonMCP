@@ -649,12 +649,9 @@ def _tool_backup_save_export(
 
 
 def _read_memory_region(holder: EmulatorState, address: int, size: int) -> bytes:
-    """Read a contiguous region of memory as raw bytes."""
+    """Read a contiguous region of memory as raw bytes (bulk, single FFI call)."""
     emu = holder._require_rom()
-    data = bytearray(size)
-    for i in range(size):
-        data[i] = emu.memory_read_byte(address + i)
-    return bytes(data)
+    return emu.memory_read_block(address, size)
 
 
 def _tool_dump_memory(

@@ -53,6 +53,7 @@ class BridgeServer:
             "get_screenshot": self._get_screenshot,
             "read_memory": self._read_memory,
             "read_memory_range": self._read_memory_range,
+            "read_memory_block": self._read_memory_block,
             "write_memory": self._write_memory,
             "input_keypad_update": self._input_keypad_update,
             "cycle": self._cycle,
@@ -150,6 +151,13 @@ class BridgeServer:
         step = {"byte": 1, "short": 2, "long": 4}[size]
         values = [fn(address + i * step) for i in range(count)]
         return {"values": values}
+
+    def _read_memory_block(self, address: int, size: int) -> dict:
+        """Read a contiguous block of memory as base64 (single FFI call)."""
+        import base64
+        emu = self._holder._require_rom()
+        data = emu.memory_read_block(address, size)
+        return {"data_b64": base64.b64encode(data).decode("ascii"), "size": len(data)}
 
     def _write_memory(self, address: int, value: int, size: str = "byte") -> dict:
         emu = self._holder._require_rom()

@@ -347,6 +347,14 @@ signed int melonds_memory_read_long_signed(int address)
     return (signed int)melonds_memory_read_long(address);
 }
 
+int melonds_memory_read_block(int address, int size, unsigned char* buffer)
+{
+    if (!g_nds || !buffer || size <= 0) return 0;
+    for (int i = 0; i < size; i++)
+        buffer[i] = g_nds->ARM9Read8((u32)(address + i));
+    return size;
+}
+
 void melonds_memory_write_byte(int address, unsigned char value)
 {
     if (!g_nds) return;

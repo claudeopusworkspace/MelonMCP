@@ -109,6 +109,16 @@ class EmulatorClient:
                             count=count, signed=signed)
         return result["values"]
 
+    def read_memory_block(self, address: int, size: int) -> bytes:
+        """Read a contiguous block of memory as raw bytes (bulk, single FFI call).
+
+        Uses base64 encoding on the wire for efficiency. Preferred over
+        read_memory_range for large reads (>256 bytes).
+        """
+        import base64
+        result = self._call("read_memory_block", address=address, size=size)
+        return base64.b64decode(result["data_b64"])
+
     def write_memory(self, address: int, value: int, size: str = "byte") -> None:
         """Write a value to memory."""
         self._call("write_memory", address=address, value=value, size=size)

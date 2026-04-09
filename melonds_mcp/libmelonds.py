@@ -148,6 +148,13 @@ class MelonDS:
         lib.melonds_memory_read_long_signed.argtypes = [ctypes.c_int]
         lib.melonds_memory_read_long_signed.restype = ctypes.c_int
 
+        lib.melonds_memory_read_block.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.POINTER(ctypes.c_ubyte),
+        ]
+        lib.melonds_memory_read_block.restype = ctypes.c_int
+
         lib.melonds_memory_write_byte.argtypes = [ctypes.c_int, ctypes.c_ubyte]
         lib.melonds_memory_write_byte.restype = None
 
@@ -271,6 +278,12 @@ class MelonDS:
 
     def memory_read_long_signed(self, address: int) -> int:
         return self._lib.melonds_memory_read_long_signed(address)
+
+    def memory_read_block(self, address: int, size: int) -> bytes:
+        """Read a contiguous block of memory as raw bytes (bulk, single FFI call)."""
+        buf = (ctypes.c_ubyte * size)()
+        self._lib.melonds_memory_read_block(address, size, buf)
+        return bytes(buf)
 
     def memory_write_byte(self, address: int, value: int) -> None:
         self._lib.melonds_memory_write_byte(address, ctypes.c_ubyte(value))
