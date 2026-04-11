@@ -47,6 +47,7 @@ class BridgeServer:
         """Map method names to handler functions."""
         return {
             "advance_frames": self._advance_frames,
+            "advance_frames_until": self._advance_frames_until,
             "advance_frame": self._advance_frame,
             "press_buttons": self._press_buttons,
             "tap_touch_screen": self._tap_touch_screen,
@@ -90,6 +91,23 @@ class BridgeServer:
         self._journal_write("write_frames", count=count, buttons=buttons,
                             touch_x=touch_x, touch_y=touch_y)
         return {"frames_advanced": advanced, "total_frame": self._holder.frame_count}
+
+    def _advance_frames_until(
+        self,
+        max_frames: int,
+        conditions: list[dict],
+        poll_interval: int = 1,
+        buttons: list[str] | None = None,
+        touch_x: int | None = None,
+        touch_y: int | None = None,
+        read_addresses: list[dict] | None = None,
+    ) -> dict:
+        result = self._holder.advance_frames_until(
+            max_frames, conditions, poll_interval, buttons, touch_x, touch_y, read_addresses,
+        )
+        self._journal_write("write_frames", count=result["frames_elapsed"],
+                            buttons=buttons, touch_x=touch_x, touch_y=touch_y)
+        return result
 
     def _advance_frame(self, buttons: list[str] | None = None,
                        touch_x: int | None = None, touch_y: int | None = None) -> dict:

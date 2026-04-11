@@ -12,7 +12,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, ClassVar
 
 from PIL import Image
 
@@ -376,6 +376,186 @@ class EmulatorState:
                 count, elapsed, buttons, self.frame_count,
             )
         return count
+
+    # -- Condition helpers for advance_frames_until --
+
+    def _read_memory_by_size(self, address: int, size: str) -> int:
+        """Read a memory value using a size string ('byte', 'short', 'long')."""
+        emu = self._require_rom()
+        if size == "byte":
+            return emu.memory_read_byte(address)
+        elif size == "short":
+            return emu.memory_read_short(address)
+        elif size == "long":
+            return emu.memory_read_long(address)
+        else:
+            raise ValueError(f"Invalid size: {size!r}. Must be 'byte', 'short', or 'long'.")
+
+    _VALUE_OPS: ClassVar[dict[str, Callable[[int, int], bool]]] = {
+        "==": lambda a, b: a == b,
+        "!=": lambda a, b: a != b,
+        ">": lambda a, b: a > b,
+        "<": lambda a, b: a < b,
+        ">=": lambda a, b: a >= b,
+        "<=": lambda a, b: a <= b,
+        "&": lambda a, b: (a & b) != 0,
+    }
+
+    def _check_condition(
+        self,
+        cond: dict,
+        initial_value: int | None = None,
+    ) -> dict | None:
+        """Check a single condition. Returns a match dict or None."""
+        ctype = cond["type"]
+
+        if ctype == "value":
+            current = self._read_memory_by_size(cond["address"], cond.get("size", "byte"))
+            op_fn = self._VALUE_OPS.get(cond["operator"])
+            if op_fn is None:
+                raise ValueError(f"Unknown operator: {cond['operator']!r}")
+            if op_fn(current, cond["value"]):
+                return {"matched_value": current}
+            return None
+
+        elif ctype == "changed":
+            current = self._read_memory_by_size(cond["address"], cond.get("size", "byte"))
+            if current != initial_value:
+                return {"initial_value": initial_value, "matched_value": current}
+            return None
+
+        elif ctype == "pattern":
+            emu = self._require_rom()
+            data = emu.memory_read_block(cond["address"], cond["length"])
+            pattern = bytes.fromhex(cond["pattern"])
+            offset = data.find(pattern)
+            if offset != -1:
+                return {"matched_offset": cond["address"] + offset}
+            return None
+
+        else:
+            raise ValueError(f"Unknown condition type: {ctype!r}")
+
+    def advance_frames_until(
+        self,
+        max_frames: int,
+        conditions: list[dict],
+        poll_interval: int = 1,
+        buttons: list[str] | None = None,
+        touch_x: int | None = None,
+        touch_y: int | None = None,
+        read_addresses: list[dict] | None = None,
+    ) -> dict:
+        """Advance up to max_frames, returning early when a memory condition is met.
+
+        Eliminates MCP round-trip overhead by running the poll loop internally.
+        Checks conditions every poll_interval frames using direct ctypes FFI.
+
+        Args:
+            max_frames: Upper bound on frames to advance.
+            conditions: List of condition dicts (OR logic). Types: value, changed, pattern.
+            poll_interval: Check conditions every N frames (default 1).
+            buttons: Buttons to hold during advance.
+            touch_x: Touchscreen X position.
+            touch_y: Touchscreen Y position.
+            read_addresses: Additional addresses to read on return.
+
+        Returns:
+            Dict with triggered, condition_index, frames_elapsed, total_frame,
+            match details, and optional reads.
+        """
+        emu = self._require_rom()
+        t0 = time.monotonic()
+
+        # Capture initial state for conditions that need it
+        initial_values: dict[int, int | None] = {}
+        for i, cond in enumerate(conditions):
+            if cond["type"] == "changed":
+                initial_values[i] = self._read_memory_by_size(
+                    cond["address"], cond.get("size", "byte")
+                )
+            elif cond["type"] == "pattern":
+                # Record whether pattern is already present — if so, don't trigger
+                # until it disappears and reappears (i.e., skip while still present)
+                data = emu.memory_read_block(cond["address"], cond["length"])
+                pattern = bytes.fromhex(cond["pattern"])
+                initial_values[i] = 1 if data.find(pattern) != -1 else 0
+
+        frames = 0
+        triggered = False
+        match_index = -1
+        match_info: dict = {}
+
+        emu.set_skip_render(True)
+        try:
+            while frames < max_frames:
+                self.advance_frame(buttons, touch_x, touch_y)
+                frames += 1
+
+                if frames % poll_interval == 0 or frames == max_frames:
+                    for i, cond in enumerate(conditions):
+                        if cond["type"] == "pattern" and initial_values.get(i) == 1:
+                            # Pattern was present at start. Track when it disappears
+                            # so a future reappearance can trigger.
+                            result = self._check_condition(cond)
+                            if result is None:
+                                # Pattern disappeared — mark as absent so next
+                                # appearance triggers normally
+                                initial_values[i] = 0
+                            continue
+
+                        result = self._check_condition(cond, initial_values.get(i))
+                        if result is not None:
+                            triggered = True
+                            match_index = i
+                            match_info = result
+                            break
+                    if triggered:
+                        break
+        finally:
+            emu.set_skip_render(False)
+
+        # Render one final frame for screenshot-ready state
+        self.advance_frame(buttons, touch_x, touch_y)
+        frames += 1
+
+        self._notify_frame_change()
+
+        elapsed = time.monotonic() - t0
+        logger.debug(
+            "advance_frames_until: %d frames in %.3fs (%.1f fps), triggered=%s, frame=%d",
+            frames, elapsed, frames / elapsed if elapsed > 0 else 0,
+            triggered, self.frame_count,
+        )
+
+        result_dict: dict = {
+            "triggered": triggered,
+            "condition_index": match_index if triggered else -1,
+            "frames_elapsed": frames,
+            "total_frame": self.frame_count,
+        }
+        if match_info:
+            result_dict.update(match_info)
+
+        # Read additional addresses if requested
+        if read_addresses:
+            reads = {}
+            for spec in read_addresses:
+                addr = spec["address"]
+                size = spec.get("size", "byte")
+                count = spec.get("count", 1)
+                size_bytes = {"byte": 1, "short": 2, "long": 4}[size]
+                key = f"0x{addr:08X}"
+                if count == 1:
+                    reads[key] = self._read_memory_by_size(addr, size)
+                else:
+                    reads[key] = [
+                        self._read_memory_by_size(addr + j * size_bytes, size)
+                        for j in range(count)
+                    ]
+            result_dict["reads"] = reads
+
+        return result_dict
 
     def press_buttons(self, buttons: list[str], frames: int = 1) -> None:
         """Press buttons for N frames, then release for 1 frame."""

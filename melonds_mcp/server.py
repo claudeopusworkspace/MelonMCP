@@ -298,6 +298,88 @@ def _tool_advance_frames(
     }
 
 
+def _tool_advance_frames_until(
+    holder: EmulatorState,
+    max_frames: int,
+    conditions: list[dict],
+    poll_interval: int,
+    buttons: list[str],
+    touch_x: int | None,
+    touch_y: int | None,
+    read_addresses: list[dict],
+) -> dict[str, Any]:
+    if max_frames < 1:
+        raise ValueError("max_frames must be >= 1")
+    if max_frames > MAX_ADVANCE_FRAMES:
+        raise ValueError(f"max_frames must be <= {MAX_ADVANCE_FRAMES}")
+    if not conditions:
+        raise ValueError("Must specify at least one condition.")
+    if len(conditions) > 16:
+        raise ValueError("Too many conditions (max 16).")
+    if poll_interval < 1:
+        raise ValueError("poll_interval must be >= 1")
+    if poll_interval > max_frames:
+        raise ValueError("poll_interval must be <= max_frames")
+
+    # Validate condition schemas
+    valid_types = {"value", "changed", "pattern"}
+    valid_operators = {"==", "!=", ">", "<", ">=", "<=", "&"}
+    valid_sizes = {"byte", "short", "long"}
+    for i, cond in enumerate(conditions):
+        ctype = cond.get("type")
+        if ctype not in valid_types:
+            raise ValueError(
+                f"conditions[{i}]: type must be one of {valid_types}, got {ctype!r}"
+            )
+        if "address" not in cond:
+            raise ValueError(f"conditions[{i}]: missing required field 'address'")
+        if ctype == "value":
+            if "operator" not in cond:
+                raise ValueError(f"conditions[{i}]: value condition requires 'operator'")
+            if cond["operator"] not in valid_operators:
+                raise ValueError(
+                    f"conditions[{i}]: operator must be one of {valid_operators}"
+                )
+            if "value" not in cond:
+                raise ValueError(f"conditions[{i}]: value condition requires 'value'")
+        if ctype in ("value", "changed"):
+            if cond.get("size", "byte") not in valid_sizes:
+                raise ValueError(f"conditions[{i}]: size must be one of {valid_sizes}")
+        if ctype == "pattern":
+            if "length" not in cond:
+                raise ValueError(f"conditions[{i}]: pattern condition requires 'length'")
+            if "pattern" not in cond:
+                raise ValueError(f"conditions[{i}]: pattern condition requires 'pattern'")
+            # Validate hex string
+            try:
+                bytes.fromhex(cond["pattern"])
+            except ValueError:
+                raise ValueError(
+                    f"conditions[{i}]: 'pattern' must be a valid hex string"
+                )
+
+    # Validate read_addresses
+    for i, spec in enumerate(read_addresses):
+        if "address" not in spec:
+            raise ValueError(f"read_addresses[{i}]: missing required field 'address'")
+        if spec.get("size", "byte") not in valid_sizes:
+            raise ValueError(f"read_addresses[{i}]: size must be one of {valid_sizes}")
+
+    result = holder.advance_frames_until(
+        max_frames=max_frames,
+        conditions=conditions,
+        poll_interval=poll_interval,
+        buttons=buttons or None,
+        touch_x=touch_x,
+        touch_y=touch_y,
+        read_addresses=read_addresses or None,
+    )
+    frames_elapsed = result["frames_elapsed"]
+    _journal_write(holder, "write_frames", count=frames_elapsed,
+                   buttons=buttons or None, touch_x=touch_x, touch_y=touch_y)
+    return result
+
+
 def _tool_press_buttons(
     holder: EmulatorState, buttons: list[str], frames: int
 ) -> dict[str, Any]:
@@ -1305,6 +1387,44 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
             touch_y: Touchscreen Y position (0-191).
         """
         return _tool_advance_frames(holder, count, buttons, touch_x, touch_y)
+
+    @mcp.tool()
+    def advance_frames_until(
+        max_frames: int,
+        conditions: list[dict],
+        poll_interval: int = 1,
+        buttons: list[str] = [],
+        touch_x: int | None = None,
+        touch_y: int | None = None,
+        read_addresses: list[dict] = [],
+    ) -> dict[str, Any]:
+        """Advance up to N frames, returning early when a memory condition is met.
+
+        Runs the poll loop internally at full emulator speed, eliminating MCP
+        round-trip overhead. Checks conditions every poll_interval frames.
+        Multiple conditions use OR logic (first match wins).
+
+        Condition types:
+        - value: {"type": "value", "address": int, "size": "byte"|"short"|"long",
+                  "operator": "=="|"!="|">"|"<"|">="|"<="|"&", "value": int}
+        - changed: {"type": "changed", "address": int, "size": "byte"|"short"|"long"}
+          Fires when the value differs from its state at the start of the call.
+        - pattern: {"type": "pattern", "address": int, "length": int, "pattern": "hex"}
+          Scans a memory range for a byte sequence. Fires when found (skips if already present).
+
+        Args:
+            max_frames: Upper bound on frames to advance (1-3600).
+            conditions: List of condition objects to check (OR logic, max 16).
+            poll_interval: Check conditions every N frames (default 1).
+            buttons: Buttons to hold throughout. Valid: a, b, x, y, l, r, start, select, up, down, left, right.
+            touch_x: Touchscreen X position (0-255).
+            touch_y: Touchscreen Y position (0-191).
+            read_addresses: Additional memory reads on return. Each: {"address": int, "size": "byte"|"short"|"long", "count": int}.
+        """
+        return _tool_advance_frames_until(
+            holder, max_frames, conditions, poll_interval,
+            buttons, touch_x, touch_y, read_addresses,
+        )
 
     @mcp.tool()
     def press_buttons(buttons: list[str], frames: int = 1) -> dict[str, Any]:
