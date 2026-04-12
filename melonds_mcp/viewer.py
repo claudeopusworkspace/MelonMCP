@@ -555,7 +555,11 @@ h1 {{
     var COMMENTARY_FADE_SECS = 0.5;
 
     function addCommentary(streamTime, text, style) {{
-        commentaryQueue.push({{streamTime: streamTime, text: text, style: style || 'normal', shown: false, inSidebar: false}});
+        // If stream_time is ahead of current playback (emulator runs ahead
+        // of the renderer), clamp to current time so it shows immediately.
+        var now = video.currentTime || 0;
+        var effectiveTime = Math.min(streamTime, now);
+        commentaryQueue.push({{streamTime: effectiveTime, text: text, style: style || 'normal', shown: false, inSidebar: false}});
     }}
 
     function updateCommentary() {{
