@@ -548,7 +548,10 @@ h1 {{
                     seekedToLive = true;
                     video.play().catch(function() {{}});
                 }}
-                if (video.paused && video.readyState >= 2 && mode === 'video') {{
+                // Resume playback if stalled or paused.  When the buffer
+                // runs dry the video enters 'waiting' state (not paused),
+                // so checking paused alone misses buffer-starvation recovery.
+                if (video.readyState >= 3 && mode === 'video') {{
                     video.play().catch(function() {{}});
                 }}
                 // Trim old buffer data when no appends are pending.
