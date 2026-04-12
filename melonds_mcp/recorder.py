@@ -3,11 +3,11 @@
 Runs alongside the HLS streamer in the renderer subprocess.  The streamer
 tees each (video, audio) frame pair to the recorder via write_frame().
 Commentary events arrive from the journal and are saved to a companion
-JSON file when the recording stops.
+JSON file incrementally (survives unclean shutdown).
 
 Output files (in recordings_dir):
     YYYYMMDD_HHMMSS.mp4  — fragmented MP4 (playable even on unclean shutdown)
-    YYYYMMDD_HHMMSS.json — metadata + timestamped commentary
+    YYYYMMDD_HHMMSS.json — metadata + timestamped commentary (written incrementally)
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -55,6 +54,7 @@ class SessionRecorder:
         self._timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self._mp4_path = self._recordings_dir / f"{self._timestamp}.mp4"
         self._json_path = self._recordings_dir / f"{self._timestamp}.json"
+        self._json_tmp = self._recordings_dir / f".{self._timestamp}.json.tmp"
         self._started_at = datetime.now(timezone.utc).isoformat()
 
         self._tmp_dir = Path(tempfile.mkdtemp(prefix="melonds_rec_"))
@@ -77,12 +77,32 @@ class SessionRecorder:
     def mp4_path(self) -> Path:
         return self._mp4_path
 
+    def _flush_json(self) -> None:
+        """Atomically write the current metadata to the companion JSON file."""
+        duration = self._frames_written / _FPS
+        with self._commentary_lock:
+            commentary = list(self._commentary)
+        meta = {
+            "started": self._started_at,
+            "duration": round(duration, 2),
+            "frames": self._frames_written,
+            "commentary": commentary,
+        }
+        try:
+            self._json_tmp.write_text(json.dumps(meta, indent=2))
+            os.replace(str(self._json_tmp), str(self._json_path))
+        except Exception:
+            logger.warning("Failed to flush recorder JSON", exc_info=True)
+
     def start(self) -> None:
         """Start ffmpeg and the writer thread."""
         if self._running:
             return
 
         self._running = True
+
+        # Write initial JSON so the file exists even on unclean shutdown
+        self._flush_json()
 
         os.mkfifo(str(self._video_fifo))
         os.mkfifo(str(self._audio_fifo))
@@ -222,16 +242,18 @@ class SessionRecorder:
     def add_commentary(
         self, stream_time: float, text: str, style: str = "normal"
     ) -> None:
-        """Record a commentary event with its timestamp."""
+        """Record a commentary event and flush to JSON immediately."""
         with self._commentary_lock:
             self._commentary.append({
                 "time": stream_time,
                 "text": text,
                 "style": style,
             })
+        # Flush JSON so commentary survives unclean shutdown
+        self._flush_json()
 
     def stop(self) -> None:
-        """Finalize the recording: close ffmpeg, write companion JSON."""
+        """Finalize the recording: close ffmpeg, write final JSON."""
         if not self._running:
             return
 
@@ -244,18 +266,27 @@ class SessionRecorder:
         except queue.Full:
             pass
 
-        # Wait for writer thread
+        # Wait for writer thread — this closes the FIFOs, sending EOF to ffmpeg
         if self._frame_writer and self._frame_writer.is_alive():
             self._frame_writer.join(timeout=10.0)
 
-        # Terminate ffmpeg
+        # Give ffmpeg time to finalize the file after receiving EOF on its
+        # inputs.  Only terminate if it doesn't exit on its own.
         if self._ffmpeg_proc is not None:
-            self._ffmpeg_proc.terminate()
             try:
                 self._ffmpeg_proc.wait(timeout=5)
+                logger.debug(
+                    "Recorder ffmpeg exited cleanly (code %d)",
+                    self._ffmpeg_proc.returncode,
+                )
             except subprocess.TimeoutExpired:
-                self._ffmpeg_proc.kill()
-                self._ffmpeg_proc.wait(timeout=2)
+                logger.warning("Recorder ffmpeg did not exit after EOF, terminating")
+                self._ffmpeg_proc.terminate()
+                try:
+                    self._ffmpeg_proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self._ffmpeg_proc.kill()
+                    self._ffmpeg_proc.wait(timeout=2)
             # Log last few lines for diagnostics
             try:
                 self._ffmpeg_log.close()
@@ -273,26 +304,12 @@ class SessionRecorder:
                 pass
             self._ffmpeg_proc = None
 
-        # Write companion JSON
-        duration = self._frames_written / _FPS
-        with self._commentary_lock:
-            commentary = list(self._commentary)
-        meta = {
-            "started": self._started_at,
-            "duration": round(duration, 2),
-            "frames": self._frames_written,
-            "commentary": commentary,
-        }
-        try:
-            self._json_path.write_text(json.dumps(meta, indent=2))
-            logger.info("Recorder wrote metadata: %s", self._json_path)
-        except Exception:
-            logger.error("Failed to write recorder JSON", exc_info=True)
+        # Write final JSON with accurate frame count
+        self._flush_json()
+        logger.info("Session recorder stopped: %s", self._mp4_path)
 
         # Clean up temp dir
         try:
             shutil.rmtree(self._tmp_dir, ignore_errors=True)
         except Exception:
             pass
-
-        logger.info("Session recorder stopped: %s", self._mp4_path)

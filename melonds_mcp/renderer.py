@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -113,6 +114,13 @@ def main() -> None:
             time.sleep(0.5)
 
     logger.info("Connected to journal, entering replay loop")
+
+    # Handle SIGTERM so the recorder can finalize on kill
+    def _sigterm_handler(signum, frame):
+        logger.info("Renderer received SIGTERM")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     # Write initial frame position
     _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)

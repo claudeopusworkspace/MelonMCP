@@ -1148,6 +1148,26 @@ a:hover {{ text-decoration: underline; }}
     video.addEventListener('seeking', function() {{
         overlay.innerHTML = '';
     }});
+
+    // Handle end-of-video and decode errors gracefully.
+    // Fragmented MP4 from unclean shutdown may have a corrupt final
+    // fragment that triggers a MediaError.  Reset the source so the
+    // user can seek back and replay without reloading the page.
+    video.addEventListener('error', function() {{
+        var err = video.error;
+        if (err) {{
+            console.warn('Video error code=' + err.code + ': ' + (err.message || ''));
+            // Re-set the source to recover — browser clears the error state
+            var src = video.querySelector('source').src;
+            video.removeAttribute('src');
+            video.load();
+            var newSource = document.createElement('source');
+            newSource.src = src;
+            newSource.type = 'video/mp4';
+            video.appendChild(newSource);
+            video.load();
+        }}
+    }});
 }})();
 </script>
 </body>
