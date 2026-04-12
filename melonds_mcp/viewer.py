@@ -366,7 +366,9 @@ h1 {{
     function updateBufferInfo() {{
         if (video.buffered.length > 0) {{
             var ahead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
-            bufInfo.textContent = ahead.toFixed(1) + 's';
+            var rate = video.playbackRate;
+            var rateStr = (rate !== 1.0) ? ' (' + rate.toFixed(2) + 'x)' : '';
+            bufInfo.textContent = ahead.toFixed(1) + 's' + rateStr;
         }}
         requestAnimationFrame(updateBufferInfo);
     }}
@@ -383,14 +385,21 @@ h1 {{
     // when new segments arrive, playback resumes.  No third-party
     // player library making seek decisions.
     var mseReady = false;
-    var nextSegmentIndex = 0;
+    var lastSegmentName = null;
     var initFetched = false;
-    var streamEnded = false;
+    var seekedToLive = false;
     var mediaSource = null;
     var sourceBuffer = null;
     var appendQueue = [];
     var appending = false;
     var pollTimer = null;
+
+    // Live-edge tracking — target staying a few seconds behind the
+    // buffer's leading edge, which tracks wall-clock position because
+    // the renderer runs at real-time pace.
+    var LIVE_EDGE_TARGET = 3;    // ideal seconds behind live edge
+    var LIVE_SPEEDUP_AT = 5;     // nudge faster when this far behind
+    var LIVE_SLOWDOWN_AT = 1.5;  // nudge slower when this close
 
     function parseM3u8(text) {{
         var initUri = null, segments = [], ended = false;
@@ -443,12 +452,22 @@ h1 {{
                 initFetched = true;
                 fetchAndAppend(hlsBaseUrl + p.initUri);
             }}
-            var newSegs = p.segments.slice(nextSegmentIndex);
-            for (var i = 0; i < newSegs.length; i++) {{
-                fetchAndAppend(hlsBaseUrl + newSegs[i]);
+            // Name-based tracking for sliding window compatibility —
+            // the playlist rotates old segments out, so index-based
+            // tracking would re-fetch or miss segments.
+            var segsToFetch;
+            if (lastSegmentName === null) {{
+                segsToFetch = p.segments;
+            }} else {{
+                var idx = p.segments.indexOf(lastSegmentName);
+                segsToFetch = (idx >= 0) ? p.segments.slice(idx + 1) : p.segments;
             }}
-            nextSegmentIndex = p.segments.length;
-            if (p.ended) streamEnded = true;
+            for (var i = 0; i < segsToFetch.length; i++) {{
+                fetchAndAppend(hlsBaseUrl + segsToFetch[i]);
+            }}
+            if (segsToFetch.length > 0) {{
+                lastSegmentName = segsToFetch[segsToFetch.length - 1];
+            }}
         }}).catch(function() {{}});
     }}
 
@@ -481,12 +500,30 @@ h1 {{
 
             sourceBuffer.addEventListener('updateend', function() {{
                 appending = false;
+                // Seek to live edge once initial segments are loaded.
+                // Wait for the append queue to drain so we have the full
+                // initial buffer before deciding where "live" is.
+                if (!seekedToLive && appendQueue.length === 0 && video.buffered.length > 0) {{
+                    var bufferedEnd = video.buffered.end(video.buffered.length - 1);
+                    if (bufferedEnd > LIVE_EDGE_TARGET + 2) {{
+                        video.currentTime = Math.max(0, bufferedEnd - LIVE_EDGE_TARGET);
+                    }}
+                    seekedToLive = true;
+                    video.play().catch(function() {{}});
+                }}
                 if (video.paused && video.readyState >= 2 && mode === 'video') {{
                     video.play().catch(function() {{}});
                 }}
-                if (streamEnded && appendQueue.length === 0 &&
-                    mediaSource.readyState === 'open') {{
-                    try {{ mediaSource.endOfStream(); }} catch(e) {{}}
+                // Trim old buffer data when no appends are pending.
+                // Keeps memory bounded for long viewing sessions.
+                if (appendQueue.length === 0 && video.buffered.length > 0 && video.currentTime > 60) {{
+                    var removeEnd = video.currentTime - 30;
+                    if (removeEnd > video.buffered.start(0) + 10) {{
+                        try {{
+                            sourceBuffer.remove(video.buffered.start(0), removeEnd);
+                            return; // remove() triggers another updateend
+                        }} catch(e) {{}}
+                    }}
                 }}
                 processAppendQueue();
             }});
@@ -514,6 +551,28 @@ h1 {{
     video.addEventListener('playing', function() {{
         if (mode === 'video') setStatus('playing', 'Playing');
     }});
+
+    // Playback rate correction — nudge speed so the player stays near
+    // the live edge without hard seeks.  The buffer's leading edge
+    // tracks wall-clock position (renderer runs at real-time), so
+    // staying N seconds behind buffered.end ≈ N seconds behind live.
+    function maintainLiveEdge() {{
+        if (mode === 'video' && mseReady && !video.paused && video.buffered.length > 0) {{
+            var liveEdge = video.buffered.end(video.buffered.length - 1);
+            var behind = liveEdge - video.currentTime;
+            if (behind > 8) {{
+                video.playbackRate = 1.05;
+            }} else if (behind > LIVE_SPEEDUP_AT) {{
+                video.playbackRate = 1.03;
+            }} else if (behind < LIVE_SLOWDOWN_AT) {{
+                video.playbackRate = 0.97;
+            }} else {{
+                video.playbackRate = 1.0;
+            }}
+        }}
+        setTimeout(maintainLiveEdge, 1000);
+    }}
+    maintainLiveEdge();
 
     function waitForStream() {{
         setStatus('waiting', 'Waiting for stream');
