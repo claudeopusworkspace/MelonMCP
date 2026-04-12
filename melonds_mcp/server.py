@@ -257,9 +257,14 @@ def _tool_load_rom(holder: EmulatorState, rom_path: str) -> dict[str, Any]:
         result["auto_started"] = "viewer"
         result["viewer_url"] = auto_result.get("url")
     elif auto == "stream":
-        auto_result = _tool_start_video_stream(holder)
+        # Start both the viewer (unified page on 8090) and the HLS
+        # stream (segments on 8091) — the viewer page loads video from
+        # the stream server cross-origin.
+        viewer_result = _tool_start_viewer(holder)
+        stream_result = _tool_start_video_stream(holder)
         result["auto_started"] = "stream"
-        result["stream_url"] = auto_result.get("url")
+        result["viewer_url"] = viewer_result.get("url")
+        result["stream_url"] = stream_result.get("url")
 
     return result
 
