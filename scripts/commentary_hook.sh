@@ -60,9 +60,20 @@ if [ -f "$SENT_HASH_FILE" ] && [ "$(cat "$SENT_HASH_FILE")" = "$HASH" ]; then
 fi
 echo "$HASH" > "$SENT_HASH_FILE"
 
+# Build the JSON payload
+PAYLOAD=$(jq -n --arg text "$LAST_RESPONSE" --argjson frame "${FRAME:-0}" '{text: $text, style: "normal", frame: $frame}')
+
+# Log what we're sending
+SEND_LOG="/tmp/commentary_send.log"
+echo "$(date '+%H:%M:%S') | event=$HOOK_EVENT frame=$FRAME hash=$HASH" >> "$SEND_LOG"
+echo "  text: ${LAST_RESPONSE:0:120}" >> "$SEND_LOG"
+echo "  payload: ${PAYLOAD:0:200}" >> "$SEND_LOG"
+
 # POST to the viewer with the retroactive frame timestamp
-curl -sf -X POST "$VIEWER_URL" \
+HTTP_CODE=$(curl -s -o /tmp/.commentary_last_response -w '%{http_code}' -X POST "$VIEWER_URL" \
     -H "Content-Type: application/json" \
     --max-time 2 \
-    -d "$(jq -n --arg text "$LAST_RESPONSE" --argjson frame "${FRAME:-0}" '{text: $text, style: "normal", frame: $frame}')" \
-    >/dev/null 2>&1 || true
+    -d "$PAYLOAD" 2>&1) || true
+
+echo "  http: $HTTP_CODE response: $(cat /tmp/.commentary_last_response 2>/dev/null)" >> "$SEND_LOG"
+echo "" >> "$SEND_LOG"
