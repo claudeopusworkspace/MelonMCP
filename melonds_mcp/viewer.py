@@ -654,6 +654,49 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        if path == "/commentary":
+            self._handle_post_commentary()
+        else:
+            self.send_error(HTTPStatus.NOT_FOUND)
+
+    # -- POST handlers --------------------------------------------------------
+
+    _VALID_STYLES = {"normal", "excited", "whisper"}
+
+    def _handle_post_commentary(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Empty body")
+            return
+        body = self.rfile.read(content_length)
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Invalid JSON")
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Missing or empty 'text'")
+            return
+        style = data.get("style", "normal")
+        if style not in self._VALID_STYLES:
+            style = "normal"
+
+        viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
+        frame = viewer.get_current_frame()
+        viewer.add_commentary(frame, text, style)
+        logger.info("Commentary via POST at frame %d: %s", frame, text[:80])
+
+        resp = json.dumps({"ok": True, "frame": frame}).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(resp))
+        self.end_headers()
+        self.wfile.write(resp)
+
     # -- endpoints ---------------------------------------------------------
 
     def _serve_html(self):

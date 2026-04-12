@@ -402,28 +402,6 @@ def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
     return {"success": True, "message": "Video stream stopped."}
 
 
-_COMMENTARY_STYLES = {"normal", "excited", "whisper"}
-
-
-def _tool_send_commentary(
-    holder: EmulatorState, text: str, style: str = "normal",
-) -> dict[str, Any]:
-    """Send commentary text to the stream overlay."""
-    if style not in _COMMENTARY_STYLES:
-        raise ValueError(f"Invalid style: {style!r}. Must be one of {sorted(_COMMENTARY_STYLES)}.")
-    if not text.strip():
-        raise ValueError("Commentary text must not be empty.")
-
-    frame = holder.frame_count
-    viewer = getattr(holder, "_viewer", None)
-    if viewer is not None:
-        viewer.add_commentary(frame, text, style)
-        logger.info("Commentary at frame %d: %s", frame, text[:80])
-        return {"success": True, "frame": frame, "style": style}
-    else:
-        logger.warning("send_commentary called but no viewer running")
-        return {"success": False, "message": "No viewer running. Start the viewer first."}
-
 
 def _tool_advance_frames(
     holder: EmulatorState,
@@ -1519,20 +1497,6 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
     def stop_video_stream() -> dict[str, Any]:
         """Stop the HLS video stream and shut down the rendering process."""
         return _tool_stop_video_stream(holder)
-
-    @mcp.tool()
-    def send_commentary(text: str, style: str = "normal") -> dict[str, Any]:
-        """Send commentary text to appear as an overlay on the video stream.
-
-        Commentary syncs to the current game frame and displays when viewers
-        reach that point in the stream. Use this to narrate gameplay decisions,
-        explain strategy, or react to events.
-
-        Args:
-            text: The commentary text to display.
-            style: Display style — "normal", "excited", or "whisper".
-        """
-        return _tool_send_commentary(holder, text, style)
 
     @mcp.tool()
     def advance_frames(
