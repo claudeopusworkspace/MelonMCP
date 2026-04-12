@@ -18,7 +18,7 @@ if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
 fi
 
 # Find the last assistant message that contains text.
-LAST_RESPONSE=$(jq -s '
+LAST_RESPONSE=$(jq -sr '
     [.[] | select(.type == "assistant")
          | select((.message.content | type) == "array")
          | select(.message.content | map(select(.type == "text")) | length > 0)]
