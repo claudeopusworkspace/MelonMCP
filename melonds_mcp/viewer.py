@@ -562,9 +562,24 @@ h1 {{
 
     video.addEventListener('waiting', function() {{
         if (mode === 'video') setStatus('buffering', 'Buffering');
+        // Freeze wall-clock tracker — no content is flowing, so
+        // wall-clock target shouldn't keep advancing.
+        if (liveOriginTime !== null) {{
+            var elapsed = (Date.now() - liveOriginTime) / 1000;
+            liveOriginPosition += elapsed;
+            liveOriginTime = null;
+            video.playbackRate = 1.0;
+        }}
     }});
     video.addEventListener('playing', function() {{
         if (mode === 'video') setStatus('playing', 'Playing');
+        // Resume wall-clock tracker from current playback position.
+        // The gap where the LLM was thinking gets absorbed — we
+        // treat the resume point as the new "live" reference.
+        if (seekedToLive && liveOriginTime === null) {{
+            liveOriginPosition = video.currentTime;
+            liveOriginTime = Date.now();
+        }}
     }});
 
     // Playback rate correction — compare current position against
