@@ -9,6 +9,7 @@
 
 VIEWER_URL="${COMMENTARY_URL:-http://localhost:8090/commentary}"
 SENT_HASH_FILE="/tmp/.commentary_last_hash"
+SEND_LOG="/tmp/commentary_send.log"
 
 INPUT=$(cat)
 
@@ -23,7 +24,8 @@ fi
 
 # Walk the transcript: track total_frame from tool_results, and snapshot
 # the text + frame whenever we see an assistant text message.
-read -r LAST_RESPONSE FRAME < <(jq -s '
+# Output as JSON so we can safely extract fields with jq.
+RESULT=$(jq -s '
     reduce .[] as $entry (
         {last_frame: null, text: null, frame: null};
         if $entry.type == "user" and ($entry.message.content | type) == "array"
@@ -39,9 +41,10 @@ read -r LAST_RESPONSE FRAME < <(jq -s '
             | .frame = .last_frame
         else . end
     )
-    | [.text, (.frame // 0 | tostring)]
-    | @tsv
 ' "$TRANSCRIPT" 2>/dev/null || true)
+
+LAST_RESPONSE=$(echo "$RESULT" | jq -r '.text // empty')
+FRAME=$(echo "$RESULT" | jq -r '.frame // 0')
 
 # On Stop, prefer last_assistant_message if the transcript text is stale
 if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$LAST_MSG" ]; then
@@ -64,10 +67,8 @@ echo "$HASH" > "$SENT_HASH_FILE"
 PAYLOAD=$(jq -n --arg text "$LAST_RESPONSE" --argjson frame "${FRAME:-0}" '{text: $text, style: "normal", frame: $frame}')
 
 # Log what we're sending
-SEND_LOG="/tmp/commentary_send.log"
 echo "$(date '+%H:%M:%S') | event=$HOOK_EVENT frame=$FRAME hash=$HASH" >> "$SEND_LOG"
 echo "  text: ${LAST_RESPONSE:0:120}" >> "$SEND_LOG"
-echo "  payload: ${PAYLOAD:0:200}" >> "$SEND_LOG"
 
 # POST to the viewer with the retroactive frame timestamp
 HTTP_CODE=$(curl -s -o /tmp/.commentary_last_response -w '%{http_code}' -X POST "$VIEWER_URL" \
