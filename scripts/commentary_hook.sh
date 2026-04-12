@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
-# Stop hook: send the assistant's latest response to the viewer as commentary.
-# Uses last_assistant_message from the hook input (current turn's text),
-# NOT the transcript (which lags by one turn).
+# PreToolUse hook: send the assistant's latest text to the viewer as commentary.
+# Parses the transcript for the most recent text-bearing assistant message,
+# deduplicates via md5 hash to avoid re-sending on consecutive tool calls.
 # Fails silently if the viewer isn't running — commentary is best-effort.
 
-set -euo pipefail
-
 VIEWER_URL="${COMMENTARY_URL:-http://localhost:8090/commentary}"
+SENT_HASH_FILE="/tmp/.commentary_last_hash"
 
 INPUT=$(cat)
-LAST_RESPONSE=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 
-# Skip empty responses (tool-only turns produce no text)
-if [ -z "$LAST_RESPONSE" ]; then
+if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
     exit 0
 fi
+
+# Find the last assistant message that contains at least one text block.
+LAST_RESPONSE=$(jq -s '
+    [.[] | select(.type == "assistant")
+         | select(.message.content | map(select(.type == "text")) | length > 0)]
+    | last
+    | .message.content // []
+    | map(select(.type == "text") | .text)
+    | join("\n")
+' "$TRANSCRIPT" 2>/dev/null || true)
+
+# Skip empty responses
+if [ -z "$LAST_RESPONSE" ] || [ "$LAST_RESPONSE" = "null" ]; then
+    exit 0
+fi
+
+# Dedup: skip if we already sent this exact text.
+HASH=$(echo "$LAST_RESPONSE" | md5sum | cut -d' ' -f1)
+if [ -f "$SENT_HASH_FILE" ] && [ "$(cat "$SENT_HASH_FILE")" = "$HASH" ]; then
+    exit 0
+fi
+echo "$HASH" > "$SENT_HASH_FILE"
 
 # POST to the viewer — timeout quickly, don't block the CLI
 curl -sf -X POST "$VIEWER_URL" \
