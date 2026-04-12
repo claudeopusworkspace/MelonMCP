@@ -42,6 +42,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-state", default=None, help="Path to initial savestate")
     parser.add_argument("--port", type=int, default=8091, help="HLS stream HTTP port")
     parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
+    parser.add_argument("--record-dir", default=None, help="Directory for recording output (enables recording)")
     return parser.parse_args()
 
 
@@ -85,6 +86,15 @@ def main() -> None:
     streamer = HLSStreamer(holder, port=args.port, blocking=True)
     streamer.start()
     logger.info("HLS streamer started on port %d (blocking mode)", args.port)
+
+    # Start session recorder if enabled
+    recorder = None
+    if args.record_dir:
+        from .recorder import SessionRecorder
+        recorder = SessionRecorder(Path(args.record_dir))
+        recorder.start()
+        streamer.set_recorder(recorder)
+        logger.info("Session recorder started, output dir: %s", args.record_dir)
 
     # Connect to journal
     reader = JournalReader(args.journal_sock)
@@ -140,12 +150,27 @@ def main() -> None:
                 holder._notify_frame_change()
                 logger.info("Renderer reset")
 
+            elif entry_type == "commentary":
+                if recorder is not None:
+                    recorder.add_commentary(
+                        entry["stream_time"],
+                        entry["text"],
+                        entry.get("style", "normal"),
+                    )
+
             elif entry_type == "load_rom":
                 rom_path = entry["rom_path"]
                 logger.info("Renderer loading new ROM: %s", rom_path)
+                if recorder is not None:
+                    recorder.stop()
                 streamer.stop()
                 holder.load_rom(rom_path)
                 streamer = HLSStreamer(holder, port=args.port, blocking=True)
+                if args.record_dir:
+                    from .recorder import SessionRecorder
+                    recorder = SessionRecorder(Path(args.record_dir))
+                    recorder.start()
+                    streamer.set_recorder(recorder)
                 streamer.start()
                 logger.info("Renderer restarted streamer for new ROM")
 
@@ -173,6 +198,9 @@ def main() -> None:
     except Exception:
         logger.error("Renderer replay loop error", exc_info=True)
     finally:
+        # Stop recorder before streamer so it can flush remaining frames
+        if recorder is not None:
+            recorder.stop()
         # Clean up frame position file
         frame_file = data_dir / _FRAME_FILE
         frame_file.unlink(missing_ok=True)

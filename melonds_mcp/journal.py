@@ -11,6 +11,7 @@ Entry types:
   {"type":"load_state","path":"/abs/path/to/state.dst"}
   {"type":"reset"}
   {"type":"load_rom","rom_path":"/abs/path/to/rom.nds"}
+  {"type":"commentary","stream_time":12.5,"text":"...","style":"normal"}
   {"type":"shutdown"}
 """
 
@@ -150,6 +151,22 @@ class JournalWriter:
         """
         entry = json.dumps({"type": "sync", "state_path": state_path})
         self._queue.put(entry)  # blocking
+
+    def write_commentary(
+        self, stream_time: float, text: str, style: str = "normal"
+    ) -> None:
+        """Write a commentary entry. Non-blocking — drops if queue is full."""
+        entry = json.dumps({
+            "type": "commentary",
+            "stream_time": stream_time,
+            "text": text,
+            "style": style,
+        })
+        try:
+            self._queue.put_nowait(entry)
+        except queue.Full:
+            self._drop_count += 1
+            logger.warning("Journal queue full — dropped commentary entry")
 
     def write_shutdown(self) -> None:
         """Write a shutdown entry. Blocks until queued (never dropped)."""

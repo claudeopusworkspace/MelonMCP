@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .emulator import EmulatorState
+    from .recorder import SessionRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,7 @@ class HLSStreamer:
         self._rt_origin: float | None = None  # wall-clock time of first frame
         self._rt_frames: int = 0  # frames written to ffmpeg since origin
         self._drop_count: int = 0  # frames dropped due to full queue
+        self._recorder: SessionRecorder | None = None
 
     @property
     def port(self) -> int:
@@ -136,6 +138,10 @@ class HLSStreamer:
     @property
     def hls_dir(self) -> Path:
         return self._hls_dir
+
+    def set_recorder(self, recorder: SessionRecorder | None) -> None:
+        """Attach a session recorder to tee frames to."""
+        self._recorder = recorder
 
     def start(self) -> None:
         """Start ffmpeg pipeline and HTTP server."""
@@ -326,6 +332,14 @@ class HLSStreamer:
                     except BrokenPipeError:
                         logger.warning("FIFO pipe broken")
                         break
+
+                    # Tee to session recorder if active
+                    if self._recorder is not None:
+                        try:
+                            self._recorder.write_frame(video_data, audio_data)
+                        except Exception:
+                            logger.warning("Recorder write failed", exc_info=True)
+
                     write_dur = time.monotonic() - t_write
                     frames_written += 1
                     if write_dur > 1.0:

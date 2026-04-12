@@ -1,3 +1,4 @@
 {
-    "auto_start": "none"
+    "auto_start": "none",
+    "record": false
 }

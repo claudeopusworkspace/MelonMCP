@@ -49,3 +49,9 @@ def get_auto_start() -> str:
         )
         return "none"
     return value
+
+
+def get_record() -> bool:
+    """Return the record setting: whether to record sessions as MP4."""
+    settings = load_settings()
+    return bool(settings.get("record", False))

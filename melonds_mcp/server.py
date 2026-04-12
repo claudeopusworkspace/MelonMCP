@@ -343,6 +343,12 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     if initial_state:
         cmd += ["--initial-state", initial_state]
 
+    from .settings import get_record
+    if get_record():
+        recordings_dir = holder.data_dir / "recordings"
+        recordings_dir.mkdir(exist_ok=True)
+        cmd += ["--record-dir", str(recordings_dir)]
+
     renderer_proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -356,6 +362,7 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     if viewer is not None:
         viewer.set_hls_port(port)
         viewer._stream_start_frame = holder.frame_count
+        viewer.set_journal(journal)
 
     return {
         "success": True,
@@ -371,6 +378,11 @@ def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
 
     if journal is None and proc is None:
         return {"success": True, "message": "No video stream running."}
+
+    # Disconnect journal from viewer before shutdown
+    viewer = getattr(holder, "_viewer", None)
+    if viewer is not None:
+        viewer.set_journal(None)
 
     # Send shutdown via journal, then stop the writer (which closes the
     # socket — the renderer will see either the shutdown entry or a socket
