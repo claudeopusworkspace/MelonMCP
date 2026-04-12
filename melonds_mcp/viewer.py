@@ -686,7 +686,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             style = "normal"
 
         viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
-        frame = viewer.get_current_frame()
+        frame = data.get("frame") or viewer.get_current_frame()
         viewer.add_commentary(frame, text, style)
         logger.info("Commentary via POST at frame %d: %s", frame, text[:80])
 

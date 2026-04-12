@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Debug: check what PreToolUse sees in the transcript
+# Debug: snapshot the JSONL transcript on each PreToolUse so Woj can inspect it.
 
 LOG="/tmp/commentary_pretool_debug.log"
+SNAPSHOT_DIR="/tmp/commentary_snapshots"
+mkdir -p "$SNAPSHOT_DIR"
 
 INPUT=$(cat)
 TIMESTAMP=$(date '+%H:%M:%S.%N')
+TIMESTAMP_FILE=$(date '+%H%M%S_%N')
 TOOL=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
 
 echo "=== PreToolUse [$TOOL] at $TIMESTAMP ===" >> "$LOG"
-echo "--- Input keys ---" >> "$LOG"
-echo "$INPUT" | jq 'keys' >> "$LOG" 2>&1
 
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
@@ -18,11 +19,12 @@ if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
     exit 0
 fi
 
-# Last 3 transcript entries
-echo "--- Last 3 entries ---" >> "$LOG"
-tail -3 "$TRANSCRIPT" | jq '{type, content_types: [.message.content[]?.type]}' >> "$LOG" 2>&1
+# Copy the full JSONL as-is
+SNAP="$SNAPSHOT_DIR/${TIMESTAMP_FILE}_${TOOL}.jsonl"
+cp "$TRANSCRIPT" "$SNAP"
+echo "Snapshot: $SNAP ($(wc -l < "$SNAP") lines)" >> "$LOG"
 
-# Last text-bearing assistant message
+# Also log a quick summary for the log file
 LAST_TEXT=$(jq -s '
     [.[] | select(.type == "assistant")
          | select(.message.content | map(select(.type == "text")) | length > 0)]
@@ -32,6 +34,5 @@ LAST_TEXT=$(jq -s '
     | join("\n")
 ' "$TRANSCRIPT" 2>/dev/null || true)
 
-echo "--- Last text (first 200 chars) ---" >> "$LOG"
-echo "${LAST_TEXT:0:200}" >> "$LOG"
+echo "Last text (first 150 chars): ${LAST_TEXT:0:150}" >> "$LOG"
 echo "" >> "$LOG"

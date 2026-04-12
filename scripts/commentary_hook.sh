@@ -1,28 +1,52 @@
 #!/usr/bin/env bash
-# PreToolUse hook: send the assistant's latest text to the viewer as commentary.
+# PreToolUse/Stop hook: send the assistant's latest text to the viewer as
+# commentary, timestamped to the correct frame (retroactively if needed).
+#
 # Parses the transcript for the most recent text-bearing assistant message,
-# deduplicates via md5 hash to avoid re-sending on consecutive tool calls.
-# Fails silently if the viewer isn't running — commentary is best-effort.
+# then finds the total_frame from the nearest preceding tool_result so the
+# commentary appears at the right point in the stream timeline.
+# Deduplicates via md5 hash.  Fails silently if the viewer isn't running.
 
 VIEWER_URL="${COMMENTARY_URL:-http://localhost:8090/commentary}"
 SENT_HASH_FILE="/tmp/.commentary_last_hash"
 
 INPUT=$(cat)
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 
+# On Stop events, also check last_assistant_message for current-turn text
+HOOK_EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty')
+LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty')
+
+TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 if [ -z "$TRANSCRIPT" ] || [ ! -f "$TRANSCRIPT" ]; then
     exit 0
 fi
 
-# Find the last assistant message that contains at least one text block.
-LAST_RESPONSE=$(jq -s '
-    [.[] | select(.type == "assistant")
-         | select(.message.content | map(select(.type == "text")) | length > 0)]
-    | last
-    | .message.content // []
-    | map(select(.type == "text") | .text)
-    | join("\n")
+# Walk the transcript: track total_frame from tool_results, and snapshot
+# the text + frame whenever we see an assistant text message.
+read -r LAST_RESPONSE FRAME < <(jq -s '
+    reduce .[] as $entry (
+        {last_frame: null, text: null, frame: null};
+        if $entry.type == "user" and ($entry.message.content | type) == "array"
+           and ($entry.message.content[0].type // "") == "tool_result" then
+            ($entry.message.content[0].content // "") as $raw
+            | if ($raw | type) == "string" then
+                (try ($raw | fromjson | .total_frame // null) catch null) as $tf
+                | if $tf != null then .last_frame = $tf else . end
+              else . end
+        elif $entry.type == "assistant" and ($entry.message.content | type) == "array"
+             and ($entry.message.content | map(select(.type == "text")) | length) > 0 then
+            .text = ($entry.message.content | map(select(.type == "text") | .text) | join("\n"))
+            | .frame = .last_frame
+        else . end
+    )
+    | [.text, (.frame // 0 | tostring)]
+    | @tsv
 ' "$TRANSCRIPT" 2>/dev/null || true)
+
+# On Stop, prefer last_assistant_message if the transcript text is stale
+if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$LAST_MSG" ]; then
+    LAST_RESPONSE="$LAST_MSG"
+fi
 
 # Skip empty responses
 if [ -z "$LAST_RESPONSE" ] || [ "$LAST_RESPONSE" = "null" ]; then
@@ -36,9 +60,9 @@ if [ -f "$SENT_HASH_FILE" ] && [ "$(cat "$SENT_HASH_FILE")" = "$HASH" ]; then
 fi
 echo "$HASH" > "$SENT_HASH_FILE"
 
-# POST to the viewer — timeout quickly, don't block the CLI
+# POST to the viewer with the retroactive frame timestamp
 curl -sf -X POST "$VIEWER_URL" \
     -H "Content-Type: application/json" \
     --max-time 2 \
-    -d "$(jq -n --arg text "$LAST_RESPONSE" '{text: $text, style: "normal"}')" \
+    -d "$(jq -n --arg text "$LAST_RESPONSE" --argjson frame "${FRAME:-0}" '{text: $text, style: "normal", frame: $frame}')" \
     >/dev/null 2>&1 || true
