@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _build_html(hls_port: int) -> str:
+def _build_html(hls_port: int, stream_start_ms: int = 0) -> str:
     """Build the unified viewer HTML with the HLS port baked in."""
     return f"""\
 <!DOCTYPE html>
@@ -287,6 +287,7 @@ h1 {{
     var overlay    = document.getElementById('commentary-overlay');
 
     var HLS_PORT = {hls_port};
+    var STREAM_START_MS = {stream_start_ms};
     var hlsBaseUrl = 'http://' + location.hostname + ':' + HLS_PORT + '/hls/';
 
     // -- Mode: video or history (screenshot browsing) --
@@ -520,14 +521,18 @@ h1 {{
 
             sourceBuffer.addEventListener('updateend', function() {{
                 appending = false;
-                // Seek to live edge once initial segments are loaded.
-                // Wait for the append queue to drain so we have the full
-                // initial buffer before deciding where "live" is.
+                // Seek to wall-clock position once initial segments load.
+                // Wall-clock = how many real seconds have elapsed since
+                // the stream started.  Capped at buffered.end so we
+                // never aim past content that actually exists.
                 if (!seekedToLive && appendQueue.length === 0 && video.buffered.length > 0) {{
-                    var bufferedEnd = video.buffered.end(video.buffered.length - 1);
-                    if (bufferedEnd > LIVE_EDGE_TARGET + 2) {{
-                        video.currentTime = Math.max(0, bufferedEnd - LIVE_EDGE_TARGET);
-                    }}
+                    var bufStart = video.buffered.start(0);
+                    var bufEnd = video.buffered.end(video.buffered.length - 1);
+                    var wallPos = (Date.now() - STREAM_START_MS) / 1000;
+                    // Clamp to available buffer range
+                    var seekTarget = Math.min(wallPos, bufEnd - 1.0);
+                    seekTarget = Math.max(seekTarget, bufStart);
+                    video.currentTime = seekTarget;
                     // Record wall-clock origin for drift correction
                     liveOriginPosition = video.currentTime;
                     liveOriginTime = Date.now();
@@ -811,7 +816,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
 
     def _serve_html(self):
         viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
-        body = _build_html(viewer._hls_port).encode()
+        body = _build_html(viewer._hls_port, viewer._stream_start_ms).encode()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
@@ -951,6 +956,7 @@ class ViewerServer:
         self._hls_port = 8091  # default, updated by set_hls_port()
         self._session_id = uuid.uuid4().hex[:12]
         self._stream_start_frame = 0
+        self._stream_start_ms: int = 0  # wall-clock start, set in start()
 
         # Frame/screenshot SSE clients
         self._clients: list[queue.Queue[str]] = []
@@ -982,6 +988,8 @@ class ViewerServer:
         """Start serving in a daemon thread."""
         if self._thread is not None:
             return
+        import time as _time
+        self._stream_start_ms = int(_time.time() * 1000)
         srv = ThreadingHTTPServer(("0.0.0.0", self._port), _ViewerHandler)
         srv.viewer = self  # type: ignore[attr-defined]
         srv.daemon_threads = True
