@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -268,6 +269,18 @@ class HLSStreamer:
                     logger.error("Audio FIFO failed to open after primer")
                     return
                 af = af_holder[0]
+                # Enlarge pipe buffers so a full video frame (294 912 B)
+                # fits without blocking.  The default 64 KB buffer causes
+                # deadlocks: the writer blocks mid-video-write while
+                # ffmpeg switches to reading the audio pipe.
+                _F_SETPIPE_SZ = 1031  # Linux-specific fcntl
+                _PIPE_BUF_TARGET = 1 << 20  # 1 MB
+                for pipe_fd, label in [(vf, "video"), (af, "audio")]:
+                    try:
+                        actual = fcntl.fcntl(pipe_fd.fileno(), _F_SETPIPE_SZ, _PIPE_BUF_TARGET)
+                        logger.info("%s pipe buffer set to %d bytes", label, actual)
+                    except OSError as e:
+                        logger.warning("Could not resize %s pipe buffer: %s", label, e)
                 # Write matching silence for the primer frame
                 af.write(b"\x00" * (_SAMPLES_PER_FRAME * 4))
                 af.flush()
