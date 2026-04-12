@@ -110,6 +110,7 @@ class HLSStreamer:
         self._video_fifo = self._hls_dir / "video.pipe"
         self._audio_fifo = self._hls_dir / "audio.pipe"
         self._ffmpeg_proc: subprocess.Popen | None = None
+        self._ffmpeg_log = None
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
         self._frame_writer: threading.Thread | None = None
@@ -222,11 +223,15 @@ class HLSStreamer:
             str(self._hls_dir / "stream.m3u8"),
         ]
 
+        # Write stderr to a file instead of a pipe — ffmpeg's progress
+        # output can fill a 64 KB pipe buffer within ~2 minutes, blocking
+        # the process entirely.  A file never blocks on write.
+        self._ffmpeg_log = open(self._hls_dir / "ffmpeg.log", "w")
         self._ffmpeg_proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=self._ffmpeg_log,
         )
         logger.info("ffmpeg started (pid %d)", self._ffmpeg_proc.pid)
 
@@ -436,12 +441,14 @@ class HLSStreamer:
             except subprocess.TimeoutExpired:
                 logger.warning("ffmpeg did not exit in 5s, killing")
                 self._ffmpeg_proc.kill()
-            # Read any ffmpeg stderr for diagnostics
+            # Read ffmpeg log for diagnostics
             try:
-                stderr = self._ffmpeg_proc.stderr.read()
-                if stderr:
-                    last_lines = stderr.decode("utf-8", errors="replace").strip().splitlines()[-10:]
-                    logger.debug("ffmpeg last stderr:\n  %s", "\n  ".join(last_lines))
+                self._ffmpeg_log.close()
+                log_path = self._hls_dir / "ffmpeg.log"
+                if log_path.is_file():
+                    last_lines = log_path.read_text(errors="replace").strip().splitlines()[-10:]
+                    if last_lines:
+                        logger.debug("ffmpeg last stderr:\n  %s", "\n  ".join(last_lines))
             except Exception:
                 pass
             self._ffmpeg_proc = None
