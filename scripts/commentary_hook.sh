@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PostToolUse/Stop hook: send the assistant's latest text to the viewer as
+# PreToolUse/Stop hook: send the assistant's latest text to the viewer as
 # commentary.  Deduplicates via md5 hash.
 # Fails silently if the viewer isn't running — commentary is best-effort.
 
@@ -45,21 +45,9 @@ if [ -f "$SENT_HASH_FILE" ] && [ "$(cat "$SENT_HASH_FILE")" = "$HASH" ]; then
 fi
 echo "$HASH" > "$SENT_HASH_FILE"
 
-# Read the frame captured by the PreToolUse hook (commentary_pretool_capture.sh).
-# If available, use it so commentary timestamps to when the tool was invoked,
-# not when it finished. Falls back to viewer's current frame if missing.
-FRAME_FILE="/tmp/.commentary_pending_frame"
-FRAME=""
-if [ -f "$FRAME_FILE" ]; then
-    FRAME=$(cat "$FRAME_FILE")
-    rm -f "$FRAME_FILE"
-fi
-
-if [ -n "$FRAME" ] && [ "$FRAME" != "null" ]; then
-    PAYLOAD=$(jq -n --arg text "$LAST_RESPONSE" --argjson frame "$FRAME" '{text: $text, style: "normal", frame: $frame}')
-else
-    PAYLOAD=$(jq -n --arg text "$LAST_RESPONSE" '{text: $text, style: "normal"}')
-fi
+# Build payload — on PreToolUse the viewer's current frame is already correct
+# (the tool hasn't run yet). On Stop we also use the current frame.
+PAYLOAD=$(jq -n --arg text "$LAST_RESPONSE" '{text: $text, style: "normal"}')
 
 # Log what we're sending
 echo "$(date '+%H:%M:%S') | event=$HOOK_EVENT hash=$HASH" >> "$SEND_LOG"
