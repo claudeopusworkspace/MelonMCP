@@ -269,7 +269,6 @@ h1 {{
     <h2>Commentary</h2>
     <div id="sidebar-entries"></div>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
 (function() {{
     var video      = document.getElementById('player');
@@ -286,9 +285,9 @@ h1 {{
     var overlay    = document.getElementById('commentary-overlay');
 
     var HLS_PORT = {hls_port};
-    var hlsUrl = 'http://' + location.hostname + ':' + HLS_PORT + '/hls/stream.m3u8';
+    var hlsBaseUrl = 'http://' + location.hostname + ':' + HLS_PORT + '/hls/';
 
-    // -- Mode: video (live HLS) or history (screenshot browsing) --
+    // -- Mode: video or history (screenshot browsing) --
     var mode = 'video';
     var history = [];
     var browseIdx = -1;
@@ -378,85 +377,154 @@ h1 {{
         statusEl.textContent = text;
     }}
 
-    // -- HLS video --
-    var hlsReady = false;
-    var retryTimer = null;
+    // -- MSE video loader --
+    // Custom Media Source Extensions loader that feeds fMP4 segments
+    // directly to the browser.  On buffer empty the video just pauses;
+    // when new segments arrive, playback resumes.  No third-party
+    // player library making seek decisions.
+    var mseReady = false;
+    var nextSegmentIndex = 0;
+    var initFetched = false;
+    var streamEnded = false;
+    var mediaSource = null;
+    var sourceBuffer = null;
+    var appendQueue = [];
+    var appending = false;
+    var pollTimer = null;
 
-    function tryLoadHls() {{
-        if (retryTimer) {{ clearTimeout(retryTimer); retryTimer = null; }}
+    function parseM3u8(text) {{
+        var initUri = null, segments = [], ended = false;
+        var lines = text.split('\n');
+        for (var i = 0; i < lines.length; i++) {{
+            var line = lines[i].trim();
+            if (line.indexOf('#EXT-X-MAP:') === 0) {{
+                var m = line.match(/URI="([^"]+)"/);
+                if (m) initUri = m[1];
+            }} else if (line.length > 0 && line[0] !== '#') {{
+                segments.push(line);
+            }} else if (line === '#EXT-X-ENDLIST') {{
+                ended = true;
+            }}
+        }}
+        return {{ initUri: initUri, segments: segments, ended: ended }};
+    }}
 
-        if (Hls.isSupported()) {{
-            // EVENT playlist mode — the stream is a growing VOD, not
-            // a true live stream.  hls.js plays linearly from the start,
-            // pauses when it reaches the end of available data, and
-            // resumes when new segments appear.  No live-sync settings
-            // needed — no seeking, no skipping, no recovery fights.
-            var hls = new Hls({{
-                maxBufferLength: 30,
-                maxMaxBufferLength: 60,
-                maxBufferHole: 0.5,
-                enableWorker: true,
-                lowLatencyMode: false,
-            }});
-
-            hls.on(Hls.Events.MEDIA_ATTACHED, function() {{
-                hls.loadSource(hlsUrl);
-            }});
-
-            hls.on(Hls.Events.MANIFEST_PARSED, function() {{
-                hlsReady = true;
-                setStatus('buffering', 'Buffering');
-                video.play().catch(function() {{}});
-            }});
-
-            hls.on(Hls.Events.FRAG_BUFFERED, function() {{
-                if (mode === 'video') setStatus('playing', 'Playing');
-            }});
-
-            // When the buffer empties, hls.js may seek back ~1 segment
-            // (2s) as stall recovery.  We allow this — a brief stutter
-            // is far better than a frozen player.  EVENT playlist mode
-            // already prevents the large seeks (20s / full rewind).
-            video.addEventListener('waiting', function() {{
-                if (mode === 'video') setStatus('buffering', 'Buffering');
-            }});
-            video.addEventListener('playing', function() {{
-                if (mode === 'video') setStatus('playing', 'Playing');
-            }});
-
-            hls.on(Hls.Events.ERROR, function(event, data) {{
-                if (data.fatal) {{
-                    hls.destroy();
-                    hlsReady = false;
-                    setStatus('error', 'Stream interrupted');
-                    retryTimer = setTimeout(tryLoadHls, 3000);
-                }}
-            }});
-
-            hls.attachMedia(video);
-        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
-            video.src = hlsUrl;
-            video.addEventListener('loadedmetadata', function() {{
-                hlsReady = true;
-                setStatus('playing', 'Playing');
-                video.play().catch(function() {{}});
-            }});
-        }} else {{
-            setStatus('error', 'HLS not supported');
+    function processAppendQueue() {{
+        if (appending || appendQueue.length === 0 || !sourceBuffer) return;
+        appending = true;
+        try {{
+            sourceBuffer.appendBuffer(appendQueue.shift());
+        }} catch (e) {{
+            console.error('appendBuffer error:', e);
+            appending = false;
         }}
     }}
 
-    // Poll for HLS availability
-    function waitForHls() {{
-        setStatus('waiting', 'Waiting for stream');
-        fetch(hlsUrl, {{method: 'HEAD'}}).then(function(r) {{
-            if (r.ok) {{ tryLoadHls(); }}
-            else {{ setTimeout(waitForHls, 1000); }}
-        }}).catch(function() {{
-            setTimeout(waitForHls, 1000);
+    function fetchAndAppend(url) {{
+        return fetch(url).then(function(r) {{
+            if (!r.ok) throw new Error('Fetch ' + r.status);
+            return r.arrayBuffer();
+        }}).then(function(buf) {{
+            appendQueue.push(buf);
+            processAppendQueue();
+        }}).catch(function(e) {{
+            console.error('Segment fetch error:', e);
         }});
     }}
-    waitForHls();
+
+    function pollPlaylist() {{
+        fetch(hlsBaseUrl + 'stream.m3u8').then(function(r) {{
+            if (!r.ok) return null;
+            return r.text();
+        }}).then(function(text) {{
+            if (!text) return;
+            var p = parseM3u8(text);
+            if (!initFetched && p.initUri) {{
+                initFetched = true;
+                fetchAndAppend(hlsBaseUrl + p.initUri);
+            }}
+            var newSegs = p.segments.slice(nextSegmentIndex);
+            for (var i = 0; i < newSegs.length; i++) {{
+                fetchAndAppend(hlsBaseUrl + newSegs[i]);
+            }}
+            nextSegmentIndex = p.segments.length;
+            if (p.ended) streamEnded = true;
+        }}).catch(function() {{}});
+    }}
+
+    function startMSE() {{
+        if (!('MediaSource' in window)) {{
+            setStatus('error', 'MSE not supported');
+            return;
+        }}
+        mediaSource = new MediaSource();
+        video.src = URL.createObjectURL(mediaSource);
+
+        mediaSource.addEventListener('sourceopen', function() {{
+            var codecs = [
+                'video/mp4; codecs="avc1.42001e,mp4a.40.2"',
+                'video/mp4; codecs="avc1.420029,mp4a.40.2"',
+                'video/mp4; codecs="avc1.4d001e,mp4a.40.2"'
+            ];
+            for (var i = 0; i < codecs.length; i++) {{
+                if (MediaSource.isTypeSupported(codecs[i])) {{
+                    try {{
+                        sourceBuffer = mediaSource.addSourceBuffer(codecs[i]);
+                        break;
+                    }} catch(e) {{ }}
+                }}
+            }}
+            if (!sourceBuffer) {{
+                setStatus('error', 'No supported codec');
+                return;
+            }}
+
+            sourceBuffer.addEventListener('updateend', function() {{
+                appending = false;
+                if (video.paused && video.readyState >= 2 && mode === 'video') {{
+                    video.play().catch(function() {{}});
+                }}
+                if (streamEnded && appendQueue.length === 0 &&
+                    mediaSource.readyState === 'open') {{
+                    try {{ mediaSource.endOfStream(); }} catch(e) {{}}
+                }}
+                processAppendQueue();
+            }});
+
+            sourceBuffer.addEventListener('error', function(e) {{
+                console.error('SourceBuffer error:', e);
+                appending = false;
+            }});
+
+            mseReady = true;
+            setStatus('buffering', 'Buffering');
+            pollPlaylist();
+            pollTimer = setInterval(pollPlaylist, 1000);
+            video.play().catch(function() {{}});
+        }});
+
+        mediaSource.addEventListener('sourceclose', function() {{
+            clearInterval(pollTimer);
+        }});
+    }}
+
+    video.addEventListener('waiting', function() {{
+        if (mode === 'video') setStatus('buffering', 'Buffering');
+    }});
+    video.addEventListener('playing', function() {{
+        if (mode === 'video') setStatus('playing', 'Playing');
+    }});
+
+    function waitForStream() {{
+        setStatus('waiting', 'Waiting for stream');
+        fetch(hlsBaseUrl + 'stream.m3u8', {{method: 'HEAD'}}).then(function(r) {{
+            if (r.ok) {{ startMSE(); }}
+            else {{ setTimeout(waitForStream, 1000); }}
+        }}).catch(function() {{
+            setTimeout(waitForStream, 1000);
+        }});
+    }}
+    waitForStream();
 
     // -- Commentary sidebar --
     var sidebarToggle  = document.getElementById('sidebar-toggle');
@@ -491,7 +559,7 @@ h1 {{
     }}
 
     function updateCommentary() {{
-        if (mode !== 'video' || !hlsReady) {{
+        if (mode !== 'video' || !mseReady) {{
             requestAnimationFrame(updateCommentary);
             return;
         }}
