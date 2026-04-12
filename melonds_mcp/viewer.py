@@ -258,6 +258,7 @@ h1 {{
         <button id="unmute-btn" class="muted">UNMUTE</button>
         <input id="volume-slider" type="range" min="0" max="100" value="50">
         <span id="vol-label">50%</span>
+        <span>Time: <span id="stream-time">&mdash;</span></span>
         <span>Buffer: <span id="buffer-info">&mdash;</span></span>
         <span>Frame: <span id="frame-count">&mdash;</span></span>
         <span id="history-pos"></span>
@@ -279,6 +280,7 @@ h1 {{
     var muteBtn    = document.getElementById('unmute-btn');
     var volSlider  = document.getElementById('volume-slider');
     var volLabel   = document.getElementById('vol-label');
+    var streamTime = document.getElementById('stream-time');
     var frameTxt   = document.getElementById('frame-count');
     var modeBadge  = document.getElementById('mode-badge');
     var historyPos = document.getElementById('history-pos');
@@ -363,16 +365,23 @@ h1 {{
     }});
 
     // -- Buffer info --
+    function fmtTime(secs) {{
+        var m = Math.floor(secs / 60);
+        var s = Math.floor(secs % 60);
+        return m + ':' + (s < 10 ? '0' : '') + s;
+    }}
     function updateBufferInfo() {{
         if (video.buffered.length > 0) {{
-            var bufAhead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+            var cur = video.currentTime;
+            streamTime.textContent = fmtTime(cur);
+            var bufAhead = video.buffered.end(video.buffered.length - 1) - cur;
             var rate = video.playbackRate;
             var rateStr = (rate !== 1.0) ? ' (' + rate.toFixed(2) + 'x)' : '';
             var driftStr = '';
             if (liveOriginTime !== null) {{
                 var elapsed = (Date.now() - liveOriginTime) / 1000;
                 var wallTarget = liveOriginPosition + elapsed;
-                var drift = (video.currentTime - wallTarget).toFixed(1);
+                var drift = (cur - wallTarget).toFixed(1);
                 var sign = drift >= 0 ? '+' : '';
                 driftStr = ' | drift ' + sign + drift + 's';
             }}
