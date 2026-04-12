@@ -415,6 +415,21 @@ h1 {{
                 if (mode === 'video') setStatus('playing', 'Playing');
             }});
 
+            // -- Seeking guard --
+            // hls.js seeks to the start of the playlist when the buffer
+            // empties (common in our bursty stream).  Track the playback
+            // position and reject any large backward seeks — the video
+            // should just pause in place and resume when new data arrives.
+            var lastGoodTime = 0;
+            video.addEventListener('timeupdate', function() {{
+                lastGoodTime = video.currentTime;
+            }});
+            video.addEventListener('seeking', function() {{
+                if (video.currentTime < lastGoodTime - 5) {{
+                    video.currentTime = lastGoodTime;
+                }}
+            }});
+
             // Show buffering status when waiting for data — the video
             // just pauses naturally and resumes when segments arrive.
             video.addEventListener('waiting', function() {{
