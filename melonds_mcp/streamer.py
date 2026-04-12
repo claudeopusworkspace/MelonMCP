@@ -230,12 +230,33 @@ class HLSStreamer:
         Real-time throttling is applied once per frame — this keeps audio
         and video perfectly synchronized and prevents either FIFO from
         racing ahead and deadlocking ffmpeg.
+
+        The two FIFOs are opened concurrently because ffmpeg opens its
+        inputs sequentially and won't open the audio FIFO until it has
+        received some video data.  A sequential open here would deadlock:
+        the writer can't send video until both FIFOs are open, but ffmpeg
+        won't open the second until video flows on the first.
         """
         logger.info("Frame writer thread starting")
         frames_written = 0
+        af_holder: list = []
+
+        def _open_audio():
+            af_holder.append(open(self._audio_fifo, "wb"))
+
         try:
-            with open(self._video_fifo, "wb") as vf, \
-                 open(self._audio_fifo, "wb") as af:
+            # Open audio FIFO in a background thread so it doesn't block
+            # the video FIFO open.  ffmpeg opens inputs sequentially
+            # (video first) so the video open unblocks first; the audio
+            # open unblocks once ffmpeg gets to its second input.
+            audio_opener = threading.Thread(target=_open_audio, daemon=True)
+            audio_opener.start()
+            with open(self._video_fifo, "wb") as vf:
+                audio_opener.join()
+                if not af_holder:
+                    logger.error("Audio FIFO failed to open")
+                    return
+                af = af_holder[0]
                 logger.info("Both FIFOs opened for writing")
                 while self._running:
                     try:
@@ -285,6 +306,12 @@ class HLSStreamer:
                 logger.error("Error opening FIFOs: %s", e)
         except Exception:
             logger.error("Frame writer thread crashed", exc_info=True)
+        finally:
+            if af_holder:
+                try:
+                    af_holder[0].close()
+                except Exception:
+                    pass
         logger.info("Frame writer thread exiting (wrote %d frames)", frames_written)
 
     def _on_cycle(self) -> None:
