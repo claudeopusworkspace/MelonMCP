@@ -1201,6 +1201,8 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             self._serve_sse()
         elif path == "/commentary":
             self._serve_commentary_sse()
+        elif path == "/status":
+            self._serve_status()
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -1241,6 +1243,16 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         logger.info("Commentary via POST at frame %d: %s", frame, text[:80])
 
         resp = json.dumps({"ok": True, "frame": frame}).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(resp))
+        self.end_headers()
+        self.wfile.write(resp)
+
+    def _serve_status(self):
+        viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
+        frame = viewer.get_current_frame()
+        resp = json.dumps({"frame": frame}).encode()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(resp))
