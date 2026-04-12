@@ -37,25 +37,34 @@ class _StreamHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # silence per-request logs
 
+    def _send_cors_error(self, code):
+        """Send an error response with CORS headers so cross-origin
+        fetches from the viewer page get a clean error instead of an
+        opaque CORS block."""
+        self.send_response(code)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path.startswith("/hls/"):
             self._serve_hls_file(path[5:])  # strip /hls/ prefix
         else:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self._send_cors_error(HTTPStatus.NOT_FOUND)
 
     def do_HEAD(self):
         path = self.path.split("?")[0]
         if path.startswith("/hls/"):
             self._serve_hls_file(path[5:], head_only=True)
         else:
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self._send_cors_error(HTTPStatus.NOT_FOUND)
 
     def _serve_hls_file(self, filename: str, head_only: bool = False):
         streamer: HLSStreamer = self.server.streamer  # type: ignore[attr-defined]
         file_path = streamer.hls_dir / filename
         if not file_path.is_file():
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self._send_cors_error(HTTPStatus.NOT_FOUND)
             return
 
         if filename.endswith(".m3u8"):

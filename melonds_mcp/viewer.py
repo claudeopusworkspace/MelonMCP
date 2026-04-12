@@ -413,12 +413,25 @@ h1 {{
                 if (mode === 'video') setStatus('playing', 'Playing');
             }});
 
-            // Show buffering status when waiting for data — the video
-            // just pauses naturally and resumes when segments arrive.
+            // -- Buffer-stall seeking guard --
+            // When the buffer empties, hls.js seeks back ~1 segment as
+            // stall recovery.  We pin the position during stalls and
+            // release the guard once data arrives so hls.js can resume.
+            var stallPosition = null;
             video.addEventListener('waiting', function() {{
+                stallPosition = video.currentTime;
                 if (mode === 'video') setStatus('buffering', 'Buffering');
             }});
+            video.addEventListener('seeking', function() {{
+                if (stallPosition !== null && video.currentTime < stallPosition - 0.5) {{
+                    video.currentTime = stallPosition;
+                }}
+            }});
+            video.addEventListener('canplay', function() {{
+                stallPosition = null;
+            }});
             video.addEventListener('playing', function() {{
+                stallPosition = null;
                 if (mode === 'video') setStatus('playing', 'Playing');
             }});
 
