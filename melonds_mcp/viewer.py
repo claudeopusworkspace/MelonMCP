@@ -502,8 +502,7 @@ h1 {{
     var COMMENTARY_FADE_SECS = 0.5;
 
     function addCommentary(streamTime, text, style) {{
-        commentaryQueue.push({{streamTime: streamTime, text: text, style: style || 'normal', shown: false}});
-        addToSidebar(text, style, streamTime);
+        commentaryQueue.push({{streamTime: streamTime, text: text, style: style || 'normal', shown: false, inSidebar: false}});
     }}
 
     function updateCommentary() {{
@@ -522,6 +521,10 @@ h1 {{
                 el.textContent = c.text;
                 c.el = el;
                 overlay.appendChild(el);
+                if (!c.inSidebar) {{
+                    c.inSidebar = true;
+                    addToSidebar(c.text, c.style, c.streamTime);
+                }}
             }}
             if (c.shown && c.el) {{
                 var elapsed = (Date.now() - c.showTime) / 1000;
