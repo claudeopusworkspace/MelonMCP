@@ -206,8 +206,8 @@ class HLSStreamer:
             # timing (MPEG-TS loses ~23ms per segment at AAC frame boundaries)
             "-f", "hls",
             "-hls_time", "2",
-            "-hls_list_size", "10",
-            "-hls_flags", "delete_segments+append_list",
+            "-hls_list_size", "300",
+            "-hls_flags", "append_list",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", "init.mp4",
             "-hls_segment_filename", str(self._hls_dir / "segment_%05d.m4s"),
