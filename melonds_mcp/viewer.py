@@ -556,13 +556,20 @@ h1 {{
                 }}
                 // Trim old buffer data when no appends are pending.
                 // Keeps memory bounded for long viewing sessions.
+                // IMPORTANT: set appending=true before remove() so that
+                // fetch microtasks completing between this handler and
+                // the next updateend don't try to appendBuffer() while
+                // the remove is in progress (causes DOMException).
                 if (appendQueue.length === 0 && video.buffered.length > 0 && video.currentTime > 60) {{
                     var removeEnd = video.currentTime - 30;
                     if (removeEnd > video.buffered.start(0) + 10) {{
                         try {{
+                            appending = true;
                             sourceBuffer.remove(video.buffered.start(0), removeEnd);
                             return; // remove() triggers another updateend
-                        }} catch(e) {{}}
+                        }} catch(e) {{
+                            appending = false;
+                        }}
                     }}
                 }}
                 processAppendQueue();
