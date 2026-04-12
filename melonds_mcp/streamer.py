@@ -183,12 +183,18 @@ class HLSStreamer:
             "ffmpeg",
             "-y",
             # Video input: raw RGB frames from FIFO
+            # probesize/analyzeduration minimized since format is fully
+            # specified — this lets ffmpeg move to the audio input faster
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-f", "rawvideo",
             "-pixel_format", "rgb24",
             "-video_size", f"{_FRAME_WIDTH}x{_FRAME_HEIGHT}",
             "-framerate", str(_FPS),
             "-i", str(self._video_fifo),
             # Audio input: raw s16le stereo PCM from FIFO
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-f", "s16le",
             "-ar", str(_SAMPLE_RATE),
             "-ac", "2",
@@ -252,11 +258,19 @@ class HLSStreamer:
             audio_opener = threading.Thread(target=_open_audio, daemon=True)
             audio_opener.start()
             with open(self._video_fifo, "wb") as vf:
-                audio_opener.join()
+                # ffmpeg probes its first input before opening the second.
+                # Write a black primer frame so ffmpeg finishes probing
+                # video and proceeds to open audio.pipe.
+                vf.write(b"\x00" * _FRAME_RGB_SIZE)
+                vf.flush()
+                audio_opener.join(timeout=10.0)
                 if not af_holder:
-                    logger.error("Audio FIFO failed to open")
+                    logger.error("Audio FIFO failed to open after primer")
                     return
                 af = af_holder[0]
+                # Write matching silence for the primer frame
+                af.write(b"\x00" * (_SAMPLES_PER_FRAME * 4))
+                af.flush()
                 logger.info("Both FIFOs opened for writing")
                 while self._running:
                     try:
