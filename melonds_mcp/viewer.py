@@ -98,8 +98,14 @@ video {{
     font-size: 14px;
     max-width: 460px;
     text-align: center;
+    line-height: 1.4;
     animation: fadeIn 0.3s ease-out;
     transition: opacity 0.5s ease-out;
+    /* Clamp to 3 lines max, ellipsis on overflow */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }}
 .commentary-msg.excited {{
     background: rgba(255, 152, 0, 0.85);
@@ -178,6 +184,64 @@ h1 {{
     font-size: 11px;
     color: #555;
 }}
+/* -- Commentary sidebar -- */
+#sidebar-toggle {{
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    padding: 6px 12px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #aaa;
+    font-family: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    z-index: 100;
+    letter-spacing: 1px;
+}}
+#sidebar-toggle:hover {{ background: #333; color: #ddd; }}
+#sidebar-toggle.active {{ background: #2e7d32; color: #fff; border-color: #4caf50; }}
+#commentary-sidebar {{
+    position: fixed;
+    top: 0;
+    right: -340px;
+    width: 320px;
+    height: 100vh;
+    background: #1a1a1a;
+    border-left: 1px solid #333;
+    overflow-y: auto;
+    padding: 48px 12px 12px;
+    transition: right 0.25s ease;
+    z-index: 90;
+}}
+#commentary-sidebar.open {{
+    right: 0;
+}}
+#commentary-sidebar h2 {{
+    font-size: 13px;
+    color: #666;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}}
+.sidebar-entry {{
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    border-radius: 4px;
+    background: #222;
+    font-size: 13px;
+    line-height: 1.4;
+    color: #ccc;
+    border-left: 3px solid #555;
+}}
+.sidebar-entry.excited {{ border-left-color: #ff9800; }}
+.sidebar-entry.whisper {{ border-left-color: #666; font-style: italic; color: #999; }}
+.sidebar-entry .entry-time {{
+    font-size: 10px;
+    color: #555;
+    margin-bottom: 4px;
+}}
 </style>
 </head>
 <body>
@@ -199,6 +263,11 @@ h1 {{
         <span id="history-pos"></span>
     </div>
     <div id="hint">Arrow keys: browse screenshots &middot; Space: return to video</div>
+</div>
+<button id="sidebar-toggle">COMMENTARY</button>
+<div id="commentary-sidebar">
+    <h2>Commentary</h2>
+    <div id="sidebar-entries"></div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
@@ -318,11 +387,16 @@ h1 {{
 
         if (Hls.isSupported()) {{
             var hls = new Hls({{
-                liveSyncDurationCount: 3,
-                liveMaxLatencyDurationCount: 5,
+                // New viewers start at the live edge naturally (HLS manifest
+                // behavior), but we set these thresholds to unreachable values
+                // so hls.js never auto-seeks during playback.  On buffer empty
+                // the video element just pauses and resumes when data arrives.
+                liveSyncDurationCount: 9999,
+                liveMaxLatencyDurationCount: 10000,
                 liveDurationInfinity: true,
                 maxBufferLength: 30,
                 maxMaxBufferLength: 60,
+                maxBufferHole: 0.5,
                 enableWorker: true,
                 lowLatencyMode: false,
             }});
@@ -338,6 +412,15 @@ h1 {{
             }});
 
             hls.on(Hls.Events.FRAG_BUFFERED, function() {{
+                if (mode === 'video') setStatus('playing', 'Playing');
+            }});
+
+            // Show buffering status when waiting for data — the video
+            // just pauses naturally and resumes when segments arrive.
+            video.addEventListener('waiting', function() {{
+                if (mode === 'video') setStatus('buffering', 'Buffering');
+            }});
+            video.addEventListener('playing', function() {{
                 if (mode === 'video') setStatus('playing', 'Playing');
             }});
 
@@ -375,6 +458,29 @@ h1 {{
     }}
     waitForHls();
 
+    // -- Commentary sidebar --
+    var sidebarToggle  = document.getElementById('sidebar-toggle');
+    var sidebar        = document.getElementById('commentary-sidebar');
+    var sidebarEntries = document.getElementById('sidebar-entries');
+    var sidebarOpen    = false;
+
+    sidebarToggle.addEventListener('click', function() {{
+        sidebarOpen = !sidebarOpen;
+        sidebar.className = sidebarOpen ? 'open' : '';
+        sidebarToggle.className = sidebarOpen ? 'active' : '';
+    }});
+
+    function addToSidebar(text, style, streamTime) {{
+        var mins = Math.floor(streamTime / 60);
+        var secs = Math.floor(streamTime % 60);
+        var ts = mins + ':' + (secs < 10 ? '0' : '') + secs;
+        var entry = document.createElement('div');
+        entry.className = 'sidebar-entry ' + (style || 'normal');
+        entry.innerHTML = '<div class="entry-time">' + ts + '</div>' + text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        sidebarEntries.appendChild(entry);
+        sidebarEntries.scrollTop = sidebarEntries.scrollHeight;
+    }}
+
     // -- Commentary overlay --
     var commentaryQueue = [];
     var COMMENTARY_DISPLAY_SECS = 10;
@@ -382,6 +488,7 @@ h1 {{
 
     function addCommentary(streamTime, text, style) {{
         commentaryQueue.push({{streamTime: streamTime, text: text, style: style || 'normal', shown: false}});
+        addToSidebar(text, style, streamTime);
     }}
 
     function updateCommentary() {{
