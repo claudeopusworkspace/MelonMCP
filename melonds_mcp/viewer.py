@@ -138,6 +138,15 @@ h1 {{
     color: #888;
     justify-content: center;
 }}
+#status-bar span {{
+    white-space: nowrap;
+}}
+#stream-time, #buffer-info, #frame-count {{
+    display: inline-block;
+    min-width: 4.5em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}}
 .dot {{
     display: inline-block;
     width: 8px;
