@@ -365,10 +365,19 @@ h1 {{
     // -- Buffer info --
     function updateBufferInfo() {{
         if (video.buffered.length > 0) {{
-            var ahead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+            var bufAhead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
             var rate = video.playbackRate;
             var rateStr = (rate !== 1.0) ? ' (' + rate.toFixed(2) + 'x)' : '';
-            bufInfo.textContent = ahead.toFixed(1) + 's' + rateStr;
+            // Show wall-clock drift when live tracking is active
+            if (liveOriginTime !== null) {{
+                var elapsed = (Date.now() - liveOriginTime) / 1000;
+                var wallTarget = liveOriginPosition + elapsed;
+                var drift = (video.currentTime - wallTarget).toFixed(1);
+                var sign = drift >= 0 ? '+' : '';
+                bufInfo.textContent = sign + drift + 's' + rateStr;
+            }} else {{
+                bufInfo.textContent = bufAhead.toFixed(1) + 's' + rateStr;
+            }}
         }}
         requestAnimationFrame(updateBufferInfo);
     }}
@@ -394,12 +403,15 @@ h1 {{
     var appending = false;
     var pollTimer = null;
 
-    // Live-edge tracking — target staying a few seconds behind the
-    // buffer's leading edge, which tracks wall-clock position because
-    // the renderer runs at real-time pace.
-    var LIVE_EDGE_TARGET = 3;    // ideal seconds behind live edge
-    var LIVE_SPEEDUP_AT = 5;     // nudge faster when this far behind
-    var LIVE_SLOWDOWN_AT = 1.5;  // nudge slower when this close
+    // Wall-clock live tracking — we record the video position and
+    // real time at the moment we seek to live, then compute where
+    // the viewer "should" be as: origin_pos + elapsed_real_time.
+    // This targets position #3 (wall-clock) not #2 (render edge).
+    var liveOriginTime = null;     // Date.now() when we seeked to live
+    var liveOriginPosition = null; // video.currentTime at that moment
+    var LIVE_EDGE_TARGET = 3;      // initial seek: seconds behind buffer end
+    var LIVE_DRIFT_THRESHOLD = 2;  // nudge when drifted more than this
+    var LIVE_DRIFT_CLOSE = 0.5;    // close enough — stay at 1.0x
 
     function parseM3u8(text) {{
         var initUri = null, segments = [], ended = false;
@@ -508,6 +520,9 @@ h1 {{
                     if (bufferedEnd > LIVE_EDGE_TARGET + 2) {{
                         video.currentTime = Math.max(0, bufferedEnd - LIVE_EDGE_TARGET);
                     }}
+                    // Record wall-clock origin for drift correction
+                    liveOriginPosition = video.currentTime;
+                    liveOriginTime = Date.now();
                     seekedToLive = true;
                     video.play().catch(function() {{}});
                 }}
@@ -552,20 +567,29 @@ h1 {{
         if (mode === 'video') setStatus('playing', 'Playing');
     }});
 
-    // Playback rate correction — nudge speed so the player stays near
-    // the live edge without hard seeks.  The buffer's leading edge
-    // tracks wall-clock position (renderer runs at real-time), so
-    // staying N seconds behind buffered.end ≈ N seconds behind live.
+    // Playback rate correction — compare current position against
+    // wall-clock target (where the viewer *should* be), not against
+    // the buffer edge (which races ahead due to the render pipeline).
+    // Target = originPosition + realElapsedTime, capped at buffered.end
+    // so we never aim past available content.
     function maintainLiveEdge() {{
-        if (mode === 'video' && mseReady && !video.paused && video.buffered.length > 0) {{
-            var liveEdge = video.buffered.end(video.buffered.length - 1);
-            var behind = liveEdge - video.currentTime;
-            if (behind > 8) {{
+        if (mode === 'video' && mseReady && !video.paused &&
+            liveOriginTime !== null && video.buffered.length > 0) {{
+            var elapsed = (Date.now() - liveOriginTime) / 1000;
+            var wallTarget = liveOriginPosition + elapsed;
+            // Don't target past what's actually been rendered
+            var bufEnd = video.buffered.end(video.buffered.length - 1);
+            var target = Math.min(wallTarget, bufEnd - 1.0);
+            var drift = target - video.currentTime;
+            if (drift > 5) {{
+                // Very far behind wall-clock — faster correction
                 video.playbackRate = 1.05;
-            }} else if (behind > LIVE_SPEEDUP_AT) {{
-                video.playbackRate = 1.03;
-            }} else if (behind < LIVE_SLOWDOWN_AT) {{
-                video.playbackRate = 0.97;
+            }} else if (drift > LIVE_DRIFT_THRESHOLD) {{
+                // Moderately behind
+                video.playbackRate = 1.02;
+            }} else if (drift < -LIVE_DRIFT_THRESHOLD) {{
+                // Ahead of wall-clock (shouldn't happen often)
+                video.playbackRate = 0.98;
             }} else {{
                 video.playbackRate = 1.0;
             }}
