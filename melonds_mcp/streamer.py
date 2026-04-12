@@ -103,9 +103,10 @@ class HLSStreamer:
         streamer.stop()
     """
 
-    def __init__(self, holder: EmulatorState, port: int = 8091):
+    def __init__(self, holder: EmulatorState, port: int = 8091, *, blocking: bool = False):
         self._holder = holder
         self._port = port
+        self._blocking = blocking
         self._hls_dir = Path(tempfile.mkdtemp(prefix="melonds_hls_"))
         self._video_fifo = self._hls_dir / "video.pipe"
         self._audio_fifo = self._hls_dir / "audio.pipe"
@@ -376,24 +377,32 @@ class HLSStreamer:
             normalized = bytes(self._audio_buf) + b"\x00" * (needed - len(self._audio_buf))
             self._audio_buf.clear()
 
-        # Non-blocking enqueue — the real-time throttle lives in the writer
-        # thread (_write_frames) so that _on_cycle never sleeps while the
-        # emulator lock is held.  If the queue is full the frame is dropped;
-        # the 300-frame (5s) queue provides ample runway.
-        try:
-            self._frame_queue.put_nowait((raw_rgb, normalized))
-        except queue.Full:
-            self._drop_count += 1
-            # Log first drop and then periodically (every 300 = ~5s at 60fps)
-            if self._drop_count == 1 or self._drop_count % 300 == 0:
+        # Enqueue the frame for ffmpeg.  In blocking mode (renderer
+        # subprocess) we wait for queue space so no frames are ever
+        # dropped — this naturally paces the renderer to match the
+        # writer thread's real-time output.  In non-blocking mode
+        # (main emulator) we drop frames if the queue is full so MCP
+        # tool calls are never stalled by the stream.
+        if self._blocking:
+            try:
+                self._frame_queue.put((raw_rgb, normalized), timeout=5.0)
+            except queue.Full:
+                self._drop_count += 1
                 logger.warning(
-                    "Streamer queue full — dropped %d frames so far (frame %d)",
-                    self._drop_count, self._holder.frame_count,
+                    "Renderer queue blocked >5s, dropping frame %d",
+                    self._holder.frame_count,
                 )
-            # Yield CPU time so ffmpeg (separate process) can encode and
-            # drain the FIFO pipes.  Without this, a tight emulation loop
-            # starves ffmpeg and the queues stay permanently full.
-            time.sleep(0)
+        else:
+            try:
+                self._frame_queue.put_nowait((raw_rgb, normalized))
+            except queue.Full:
+                self._drop_count += 1
+                if self._drop_count == 1 or self._drop_count % 300 == 0:
+                    logger.warning(
+                        "Streamer queue full — dropped %d frames so far (frame %d)",
+                        self._drop_count, self._holder.frame_count,
+                    )
+                time.sleep(0)
 
         elapsed = time.monotonic() - t_cycle_start
         if elapsed > 0.5:

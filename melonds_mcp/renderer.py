@@ -82,9 +82,9 @@ def main() -> None:
             logger.warning("Failed to load initial state: %s", args.initial_state)
 
     # Start HLS streamer — it registers on_each_cycle to capture frames
-    streamer = HLSStreamer(holder, port=args.port)
+    streamer = HLSStreamer(holder, port=args.port, blocking=True)
     streamer.start()
-    logger.info("HLS streamer started on port %d", args.port)
+    logger.info("HLS streamer started on port %d (blocking mode)", args.port)
 
     # Connect to journal
     reader = JournalReader(args.journal_sock)
@@ -145,7 +145,7 @@ def main() -> None:
                 logger.info("Renderer loading new ROM: %s", rom_path)
                 streamer.stop()
                 holder.load_rom(rom_path)
-                streamer = HLSStreamer(holder, port=args.port)
+                streamer = HLSStreamer(holder, port=args.port, blocking=True)
                 streamer.start()
                 logger.info("Renderer restarted streamer for new ROM")
 
