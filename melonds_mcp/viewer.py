@@ -394,7 +394,7 @@ h1 {{
 
     function parseM3u8(text) {{
         var initUri = null, segments = [], ended = false;
-        var lines = text.split('\n');
+        var lines = text.split('\\n');
         for (var i = 0; i < lines.length; i++) {{
             var line = lines[i].trim();
             if (line.indexOf('#EXT-X-MAP:') === 0) {{
