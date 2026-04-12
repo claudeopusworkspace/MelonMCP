@@ -368,16 +368,15 @@ h1 {{
             var bufAhead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
             var rate = video.playbackRate;
             var rateStr = (rate !== 1.0) ? ' (' + rate.toFixed(2) + 'x)' : '';
-            // Show wall-clock drift when live tracking is active
+            var driftStr = '';
             if (liveOriginTime !== null) {{
                 var elapsed = (Date.now() - liveOriginTime) / 1000;
                 var wallTarget = liveOriginPosition + elapsed;
                 var drift = (video.currentTime - wallTarget).toFixed(1);
                 var sign = drift >= 0 ? '+' : '';
-                bufInfo.textContent = sign + drift + 's' + rateStr;
-            }} else {{
-                bufInfo.textContent = bufAhead.toFixed(1) + 's' + rateStr;
+                driftStr = ' | drift ' + sign + drift + 's';
             }}
+            bufInfo.textContent = bufAhead.toFixed(1) + 's' + driftStr + rateStr;
         }}
         requestAnimationFrame(updateBufferInfo);
     }}
