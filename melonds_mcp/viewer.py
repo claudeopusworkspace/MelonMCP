@@ -413,25 +413,14 @@ h1 {{
                 if (mode === 'video') setStatus('playing', 'Playing');
             }});
 
-            // -- Buffer-stall seeking guard --
-            // When the buffer empties, hls.js seeks back ~1 segment as
-            // stall recovery.  We pin the position during stalls and
-            // release the guard once data arrives so hls.js can resume.
-            var stallPosition = null;
+            // When the buffer empties, hls.js may seek back ~1 segment
+            // (2s) as stall recovery.  We allow this — a brief stutter
+            // is far better than a frozen player.  EVENT playlist mode
+            // already prevents the large seeks (20s / full rewind).
             video.addEventListener('waiting', function() {{
-                stallPosition = video.currentTime;
                 if (mode === 'video') setStatus('buffering', 'Buffering');
             }});
-            video.addEventListener('seeking', function() {{
-                if (stallPosition !== null && video.currentTime < stallPosition - 0.5) {{
-                    video.currentTime = stallPosition;
-                }}
-            }});
-            video.addEventListener('canplay', function() {{
-                stallPosition = null;
-            }});
             video.addEventListener('playing', function() {{
-                stallPosition = null;
                 if (mode === 'video') setStatus('playing', 'Playing');
             }});
 
