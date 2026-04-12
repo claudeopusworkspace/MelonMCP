@@ -386,14 +386,12 @@ h1 {{
         if (retryTimer) {{ clearTimeout(retryTimer); retryTimer = null; }}
 
         if (Hls.isSupported()) {{
+            // EVENT playlist mode — the stream is a growing VOD, not
+            // a true live stream.  hls.js plays linearly from the start,
+            // pauses when it reaches the end of available data, and
+            // resumes when new segments appear.  No live-sync settings
+            // needed — no seeking, no skipping, no recovery fights.
             var hls = new Hls({{
-                // New viewers start at the live edge naturally (HLS manifest
-                // behavior), but we set these thresholds to unreachable values
-                // so hls.js never auto-seeks during playback.  On buffer empty
-                // the video element just pauses and resumes when data arrives.
-                liveSyncDurationCount: 9999,
-                liveMaxLatencyDurationCount: 10000,
-                liveDurationInfinity: true,
                 maxBufferLength: 30,
                 maxMaxBufferLength: 60,
                 maxBufferHole: 0.5,
@@ -413,21 +411,6 @@ h1 {{
 
             hls.on(Hls.Events.FRAG_BUFFERED, function() {{
                 if (mode === 'video') setStatus('playing', 'Playing');
-            }});
-
-            // -- Seeking guard --
-            // hls.js seeks to the start of the playlist when the buffer
-            // empties (common in our bursty stream).  Track the playback
-            // position and reject any large backward seeks — the video
-            // should just pause in place and resume when new data arrives.
-            var lastGoodTime = 0;
-            video.addEventListener('timeupdate', function() {{
-                lastGoodTime = video.currentTime;
-            }});
-            video.addEventListener('seeking', function() {{
-                if (video.currentTime < lastGoodTime - 5) {{
-                    video.currentTime = lastGoodTime;
-                }}
             }});
 
             // Show buffering status when waiting for data — the video

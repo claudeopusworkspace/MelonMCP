@@ -206,7 +206,8 @@ class HLSStreamer:
             # timing (MPEG-TS loses ~23ms per segment at AAC frame boundaries)
             "-f", "hls",
             "-hls_time", "2",
-            "-hls_list_size", "300",
+            "-hls_list_size", "0",
+            "-hls_playlist_type", "event",
             "-hls_flags", "append_list",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", "init.mp4",
