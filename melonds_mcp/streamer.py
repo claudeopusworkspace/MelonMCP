@@ -111,10 +111,8 @@ class HLSStreamer:
         self._ffmpeg_proc: subprocess.Popen | None = None
         self._http_server: ThreadingHTTPServer | None = None
         self._http_thread: threading.Thread | None = None
-        self._video_writer: threading.Thread | None = None
-        self._audio_writer: threading.Thread | None = None
-        self._video_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=300)
-        self._audio_queue: queue.Queue[bytes | None] = queue.Queue(maxsize=300)
+        self._frame_writer: threading.Thread | None = None
+        self._frame_queue: queue.Queue[tuple[bytes, bytes] | None] = queue.Queue(maxsize=300)
         self._running = False
         # Audio normalization buffer — accumulates raw PCM and emits
         # exactly _SAMPLES_PER_FRAME samples per cycle to keep ffmpeg's
@@ -154,20 +152,13 @@ class HLSStreamer:
         # Start ffmpeg
         self._start_ffmpeg()
 
-        # Start FIFO writer threads (must happen after ffmpeg starts
+        # Start unified FIFO writer thread (must happen after ffmpeg starts
         # since open() on a FIFO blocks until the other end opens)
-        self._video_writer = threading.Thread(
-            target=self._write_fifo,
-            args=(self._video_fifo, self._video_queue, "video"),
+        self._frame_writer = threading.Thread(
+            target=self._write_frames,
             daemon=True,
         )
-        self._audio_writer = threading.Thread(
-            target=self._write_fifo,
-            args=(self._audio_fifo, self._audio_queue, "audio"),
-            daemon=True,
-        )
-        self._video_writer.start()
-        self._audio_writer.start()
+        self._frame_writer.start()
 
         # Start HTTP server
         srv = ThreadingHTTPServer(("0.0.0.0", self._port), _StreamHandler)
@@ -232,65 +223,69 @@ class HLSStreamer:
         )
         logger.info("ffmpeg started (pid %d)", self._ffmpeg_proc.pid)
 
-    def _write_fifo(
-        self, fifo_path: Path, q: queue.Queue[bytes | None], name: str
-    ) -> None:
-        """Writer thread: drains queue and writes to a named pipe.
+    def _write_frames(self) -> None:
+        """Unified writer thread: drains (video, audio) tuples and writes
+        both FIFOs in lockstep so ffmpeg always receives matching data.
 
-        The video writer also performs real-time throttling here (instead of
-        in _on_cycle) so that the emulator lock is never held during sleeps.
+        Real-time throttling is applied once per frame — this keeps audio
+        and video perfectly synchronized and prevents either FIFO from
+        racing ahead and deadlocking ffmpeg.
         """
-        logger.info("%s writer thread starting (fifo=%s)", name, fifo_path)
+        logger.info("Frame writer thread starting")
         frames_written = 0
         try:
-            with open(fifo_path, "wb") as f:
-                logger.info("%s FIFO opened for writing", name)
+            with open(self._video_fifo, "wb") as vf, \
+                 open(self._audio_fifo, "wb") as af:
+                logger.info("Both FIFOs opened for writing")
                 while self._running:
                     try:
-                        data = q.get(timeout=1.0)
+                        pair = self._frame_queue.get(timeout=1.0)
                     except queue.Empty:
                         continue
-                    if data is None:
+                    if pair is None:
                         break
-                    # Real-time throttle (video writer only) — sleep when
-                    # content is too far ahead of wall-clock to prevent
-                    # hls.js from skipping to the live edge.
-                    if name == "video":
-                        now = time.monotonic()
-                        if self._rt_origin is None:
-                            self._rt_origin = now
-                        else:
-                            self._rt_frames += 1
-                            content_secs = self._rt_frames / _FPS
-                            wall_secs = now - self._rt_origin
-                            ahead = content_secs - wall_secs
-                            if ahead > _MAX_BUFFER_SECS:
-                                sleep_dur = ahead - _MAX_BUFFER_SECS
-                                if sleep_dur > 1.0:
-                                    logger.debug(
-                                        "Streamer throttle: sleeping %.3fs (%.1fs ahead, frame %d, vq=%d)",
-                                        sleep_dur, ahead, self._rt_frames, q.qsize(),
-                                    )
-                                time.sleep(sleep_dur)
+                    video_data, audio_data = pair
+
+                    # Real-time throttle — sleep when content is too far
+                    # ahead of wall-clock.  Applied once before both writes
+                    # so neither FIFO races ahead.
+                    now = time.monotonic()
+                    if self._rt_origin is None:
+                        self._rt_origin = now
+                    else:
+                        self._rt_frames += 1
+                        content_secs = self._rt_frames / _FPS
+                        wall_secs = now - self._rt_origin
+                        ahead = content_secs - wall_secs
+                        if ahead > _MAX_BUFFER_SECS:
+                            sleep_dur = ahead - _MAX_BUFFER_SECS
+                            if sleep_dur > 1.0:
+                                logger.debug(
+                                    "Streamer throttle: sleeping %.3fs (%.1fs ahead, frame %d, q=%d)",
+                                    sleep_dur, ahead, self._rt_frames, self._frame_queue.qsize(),
+                                )
+                            time.sleep(sleep_dur)
+
                     t_write = time.monotonic()
                     try:
-                        f.write(data)
+                        vf.write(video_data)
+                        af.write(audio_data)
                     except BrokenPipeError:
-                        logger.warning("%s pipe broken", name)
+                        logger.warning("FIFO pipe broken")
                         break
                     write_dur = time.monotonic() - t_write
                     frames_written += 1
                     if write_dur > 1.0:
                         logger.warning(
-                            "%s FIFO write blocked %.3fs (frame %d, qsize=%d)",
-                            name, write_dur, frames_written, q.qsize(),
+                            "FIFO write blocked %.3fs (frame %d, qsize=%d)",
+                            write_dur, frames_written, self._frame_queue.qsize(),
                         )
         except OSError as e:
             if self._running:
-                logger.error("Error opening %s fifo: %s", name, e)
+                logger.error("Error opening FIFOs: %s", e)
         except Exception:
-            logger.error("%s writer thread crashed", name, exc_info=True)
-        logger.info("%s writer thread exiting (wrote %d frames)", name, frames_written)
+            logger.error("Frame writer thread crashed", exc_info=True)
+        logger.info("Frame writer thread exiting (wrote %d frames)", frames_written)
 
     def _on_cycle(self) -> None:
         """Called after each emulator cycle — push frame + audio to ffmpeg."""
@@ -323,15 +318,13 @@ class HLSStreamer:
             normalized = bytes(self._audio_buf) + b"\x00" * (needed - len(self._audio_buf))
             self._audio_buf.clear()
 
-        # Non-blocking enqueue — the real-time throttle lives in the video
-        # writer thread (_write_fifo) so that _on_cycle never sleeps while
-        # the emulator lock is held.  If the queue is full the frame is
-        # dropped; the 300-frame (5s) queue provides ample runway.
-        dropped = False
+        # Non-blocking enqueue — the real-time throttle lives in the writer
+        # thread (_write_frames) so that _on_cycle never sleeps while the
+        # emulator lock is held.  If the queue is full the frame is dropped;
+        # the 300-frame (5s) queue provides ample runway.
         try:
-            self._video_queue.put_nowait(raw_rgb)
+            self._frame_queue.put_nowait((raw_rgb, normalized))
         except queue.Full:
-            dropped = True
             self._drop_count += 1
             # Log first drop and then periodically (every 300 = ~5s at 60fps)
             if self._drop_count == 1 or self._drop_count % 300 == 0:
@@ -339,13 +332,6 @@ class HLSStreamer:
                     "Streamer queue full — dropped %d frames so far (frame %d)",
                     self._drop_count, self._holder.frame_count,
                 )
-
-        try:
-            self._audio_queue.put_nowait(normalized)
-        except queue.Full:
-            pass  # audio drops are logged implicitly via video drop count
-
-        if dropped:
             # Yield CPU time so ffmpeg (separate process) can encode and
             # drain the FIFO pipes.  Without this, a tight emulation loop
             # starves ffmpeg and the queues stay permanently full.
@@ -354,9 +340,9 @@ class HLSStreamer:
         elapsed = time.monotonic() - t_cycle_start
         if elapsed > 0.5:
             logger.warning(
-                "Streamer slow _on_cycle: %.3fs (frame %d, vq=%d, aq=%d)",
+                "Streamer slow _on_cycle: %.3fs (frame %d, q=%d)",
                 elapsed, self._holder.frame_count,
-                self._video_queue.qsize(), self._audio_queue.qsize(),
+                self._frame_queue.qsize(),
             )
 
     def stop(self) -> None:
@@ -381,13 +367,9 @@ class HLSStreamer:
         except Exception:
             logger.warning("Error disabling audio capture during shutdown", exc_info=True)
 
-        # Signal writer threads to exit
+        # Signal writer thread to exit
         try:
-            self._video_queue.put_nowait(None)
-        except queue.Full:
-            pass
-        try:
-            self._audio_queue.put_nowait(None)
+            self._frame_queue.put_nowait(None)
         except queue.Full:
             pass
 
