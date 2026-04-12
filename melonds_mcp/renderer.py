@@ -1,7 +1,8 @@
 """Rendering emulator process — replays journal entries at real-time for HLS streaming.
 
 Launched as a subprocess by the main MCP server:
-    python -m melonds_mcp.renderer --journal-sock <path> --rom <path> [--initial-state <path>] --port <port>
+    python -m melonds_mcp.renderer --journal-sock <path> --rom <path> \
+        [--initial-state <path>] --port <port> --data-dir <path>
 
 Initializes its own melonDS instance, attaches the HLS streamer, and
 replays input journal entries from the main emulator. The streamer's
@@ -11,11 +12,18 @@ existing real-time throttle handles pacing.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import sys
 import time
+from pathlib import Path
 
 logger = logging.getLogger("melonds_mcp.renderer")
+
+# Filename for the atomic frame-position file read by the main process.
+_FRAME_FILE = ".renderer_frame"
+_FRAME_FILE_TMP = ".renderer_frame.tmp"
 
 
 def _setup_logging() -> None:
@@ -33,16 +41,27 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rom", required=True, help="Path to NDS ROM file")
     parser.add_argument("--initial-state", default=None, help="Path to initial savestate")
     parser.add_argument("--port", type=int, default=8091, help="HLS stream HTTP port")
+    parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
     return parser.parse_args()
+
+
+def _write_frame_position(data_dir: Path, emulator_frame: int, stream_frame: int) -> None:
+    """Atomically write the renderer's current frame position for the main process."""
+    tmp_path = data_dir / _FRAME_FILE_TMP
+    final_path = data_dir / _FRAME_FILE
+    payload = json.dumps({"emulator_frame": emulator_frame, "stream_frame": stream_frame})
+    tmp_path.write_text(payload)
+    os.replace(str(tmp_path), str(final_path))
 
 
 def main() -> None:
     _setup_logging()
     args = _parse_args()
+    data_dir = Path(args.data_dir)
 
     logger.info(
-        "Renderer starting: rom=%s port=%d initial_state=%s",
-        args.rom, args.port, args.initial_state,
+        "Renderer starting: rom=%s port=%d data_dir=%s initial_state=%s",
+        args.rom, args.port, args.data_dir, args.initial_state,
     )
 
     from .emulator import EmulatorState
@@ -85,6 +104,9 @@ def main() -> None:
 
     logger.info("Connected to journal, entering replay loop")
 
+    # Write initial frame position
+    _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)
+
     # Main replay loop
     try:
         for entry in reader:
@@ -95,7 +117,13 @@ def main() -> None:
                 buttons = entry.get("buttons")
                 touch_x = entry.get("touch_x")
                 touch_y = entry.get("touch_y")
-                holder.advance_frames(count, buttons, touch_x, touch_y)
+                # Advance one frame at a time so every frame is fully
+                # rendered for the HLS stream.  advance_frames() uses
+                # skip_render on intermediate frames which produces stale
+                # framebuffer data in the streamer's _on_cycle callback.
+                for _ in range(count):
+                    holder.advance_frame(buttons, touch_x, touch_y)
+                holder._notify_frame_change()
 
             elif entry_type == "load_state":
                 path = entry["path"]
@@ -121,6 +149,15 @@ def main() -> None:
                 streamer.start()
                 logger.info("Renderer restarted streamer for new ROM")
 
+            elif entry_type == "sync":
+                state_path = entry["state_path"]
+                success = holder.emu.savestate_load(state_path)
+                if success:
+                    logger.info("Renderer synced to state: %s", state_path)
+                else:
+                    logger.warning("Renderer failed to sync state: %s", state_path)
+                holder._notify_frame_change()
+
             elif entry_type == "shutdown":
                 logger.info("Renderer received shutdown")
                 break
@@ -128,11 +165,18 @@ def main() -> None:
             else:
                 logger.warning("Unknown journal entry type: %s", entry_type)
 
+            # Update frame position file after every journal entry
+            _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)
+
     except StopIteration:
         logger.info("Journal socket closed — main emulator disconnected")
     except Exception:
         logger.error("Renderer replay loop error", exc_info=True)
     finally:
+        # Clean up frame position file
+        frame_file = data_dir / _FRAME_FILE
+        frame_file.unlink(missing_ok=True)
+        (data_dir / _FRAME_FILE_TMP).unlink(missing_ok=True)
         reader.close()
         streamer.stop()
         logger.info("Renderer exiting")

@@ -1,4 +1,15 @@
-"""Lightweight web viewer — streams DS screenshots via Server-Sent Events."""
+"""Unified streaming viewer — HLS video + commentary overlay + screenshot debug.
+
+Serves a single page that combines:
+- HLS video playback (segments loaded from the renderer's HTTP server)
+- Commentary overlay synced to video playback position
+- Screenshot history browsing (debug mode)
+- Status bar with connection info, buffer, and frame counters
+
+SSE endpoints:
+- /stream  — frame update notifications (existing, kept for screenshot updates)
+- /commentary — commentary events with frame-synced timing
+"""
 
 from __future__ import annotations
 
@@ -18,16 +29,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_HTML_PAGE = """\
+
+def _build_html(hls_port: int) -> str:
+    """Build the unified viewer HTML with the HLS port baked in."""
+    return f"""\
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>melonDS Viewer</title>
+<title>melonDS Stream</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-    background: #1a1a2e;
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+    background: #111;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -35,188 +49,408 @@ body {
     min-height: 100vh;
     font-family: 'Courier New', monospace;
     color: #e0e0e0;
-}
-#container {
+}}
+#container {{
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 12px;
-}
-#screen {
+}}
+#video-wrap {{
+    position: relative;
+    width: 512px;
+    height: 768px;
+}}
+video {{
     image-rendering: pixelated;
     border: 2px solid #333;
     border-radius: 4px;
-    width: 512px;
-    height: 768px;
+    width: 100%;
+    height: 100%;
     background: #000;
-}
-#divider {
-    position: relative;
-    width: 512px;
-    margin-top: -12px;
-    margin-bottom: -12px;
-    z-index: 1;
-}
-#divider hr {
-    border: none;
-    border-top: 1px dashed #444;
-}
-#status-bar {
+}}
+#screenshot {{
+    image-rendering: pixelated;
+    border: 2px solid #333;
+    border-radius: 4px;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    display: none;
+}}
+#commentary-overlay {{
+    position: absolute;
+    bottom: 24px;
+    left: 0;
+    right: 0;
     display: flex;
-    gap: 24px;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    pointer-events: none;
+    z-index: 10;
+}}
+.commentary-msg {{
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    padding: 8px 16px;
+    border-radius: 6px;
     font-size: 14px;
-    color: #888;
-}
-#mode-badge {
-    padding: 1px 8px;
-    border-radius: 3px;
-    font-size: 12px;
+    max-width: 460px;
+    text-align: center;
+    animation: fadeIn 0.3s ease-out;
+    transition: opacity 0.5s ease-out;
+}}
+.commentary-msg.excited {{
+    background: rgba(255, 152, 0, 0.85);
     font-weight: bold;
-    letter-spacing: 1px;
-}
-#mode-badge.live    { background: #2e7d32; color: #c8e6c9; }
-#mode-badge.history { background: #e65100; color: #ffe0b2; }
-.dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #666;
-    margin-right: 6px;
-    vertical-align: middle;
-}
-.dot.connected    { background: #4caf50; }
-.dot.disconnected { background: #f44336; }
-h1 {
+}}
+.commentary-msg.whisper {{
+    background: rgba(0, 0, 0, 0.5);
+    font-style: italic;
+    font-size: 12px;
+}}
+.commentary-msg.fading {{
+    opacity: 0;
+}}
+@keyframes fadeIn {{
+    from {{ opacity: 0; transform: translateY(8px); }}
+    to {{ opacity: 1; transform: translateY(0); }}
+}}
+h1 {{
     font-size: 16px;
     font-weight: normal;
     color: #666;
     letter-spacing: 2px;
     text-transform: uppercase;
-}
-#hint {
+}}
+#status-bar {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    font-size: 13px;
+    color: #888;
+    justify-content: center;
+}}
+.dot {{
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}}
+.dot.buffering {{ background: #ff9800; }}
+.dot.playing   {{ background: #4caf50; }}
+.dot.error     {{ background: #f44336; }}
+.dot.waiting   {{ background: #666; }}
+.dot.connected {{ background: #4caf50; }}
+#mode-badge {{
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}}
+#mode-badge.video   {{ background: #2e7d32; color: #c8e6c9; }}
+#mode-badge.history {{ background: #e65100; color: #ffe0b2; }}
+#unmute-btn {{
+    padding: 4px 12px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #2e7d32;
+    color: #fff;
+    font-family: inherit;
     font-size: 12px;
+    cursor: pointer;
+    letter-spacing: 1px;
+}}
+#unmute-btn:hover {{ background: #388e3c; }}
+#unmute-btn.muted {{ background: #c62828; }}
+#volume-slider {{
+    width: 60px;
+    vertical-align: middle;
+    cursor: pointer;
+    accent-color: #4caf50;
+}}
+#vol-label {{ font-size: 11px; color: #888; }}
+#hint {{
+    font-size: 11px;
     color: #555;
-}
+}}
 </style>
 </head>
 <body>
 <div id="container">
-    <h1>melonDS Viewer</h1>
-    <img id="screen" alt="DS Screen" src="/screenshot?t=0">
-    <div id="divider"><hr></div>
+    <h1>melonDS Stream</h1>
+    <div id="video-wrap">
+        <video id="player" muted autoplay></video>
+        <img id="screenshot" alt="DS Screen">
+        <div id="commentary-overlay"></div>
+    </div>
     <div id="status-bar">
-        <span><span id="dot" class="dot disconnected"></span><span id="status-text">Connecting\u2026</span></span>
-        <span id="mode-badge" class="live">LIVE</span>
-        <span>Frame: <span id="frame-count">\u2014</span></span>
+        <span><span id="dot" class="dot waiting"></span><span id="status">Waiting</span></span>
+        <span id="mode-badge" class="video">VIDEO</span>
+        <button id="unmute-btn" class="muted">UNMUTE</button>
+        <input id="volume-slider" type="range" min="0" max="100" value="50">
+        <span id="vol-label">50%</span>
+        <span>Buffer: <span id="buffer-info">&mdash;</span></span>
+        <span>Frame: <span id="frame-count">&mdash;</span></span>
         <span id="history-pos"></span>
     </div>
-    <div id="hint">\u2190 \u2192 browse history &middot; Space: return to live</div>
+    <div id="hint">Arrow keys: browse screenshots &middot; Space: return to video</div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
-(function() {
-    var screen     = document.getElementById('screen');
+(function() {{
+    var video      = document.getElementById('player');
+    var screenshot = document.getElementById('screenshot');
     var dot        = document.getElementById('dot');
-    var statusTxt  = document.getElementById('status-text');
+    var statusEl   = document.getElementById('status');
+    var bufInfo    = document.getElementById('buffer-info');
+    var muteBtn    = document.getElementById('unmute-btn');
+    var volSlider  = document.getElementById('volume-slider');
+    var volLabel   = document.getElementById('vol-label');
     var frameTxt   = document.getElementById('frame-count');
     var modeBadge  = document.getElementById('mode-badge');
     var historyPos = document.getElementById('history-pos');
+    var overlay    = document.getElementById('commentary-overlay');
 
-    var history   = [];    // ordered list of frame numbers
-    var live      = true;  // true = showing latest, auto-updating
-    var browseIdx = -1;    // index into history when browsing
-    var sessionId = '';    // prevents cross-session cache collisions
+    var HLS_PORT = {hls_port};
+    var hlsUrl = 'http://' + location.hostname + ':' + HLS_PORT + '/hls/stream.m3u8';
 
-    function showFrame(frame) {
-        screen.src = '/screenshot?frame=' + frame + '&s=' + sessionId;
-        frameTxt.textContent = frame;
-    }
+    // -- Mode: video (live HLS) or history (screenshot browsing) --
+    var mode = 'video';
+    var history = [];
+    var browseIdx = -1;
+    var sessionId = '';
 
-    function updateBadge() {
-        if (live) {
-            modeBadge.className = 'live';
-            modeBadge.textContent = 'LIVE';
+    video.volume = 0.5;
+
+    function setMode(m) {{
+        mode = m;
+        if (m === 'video') {{
+            video.style.display = '';
+            screenshot.style.display = 'none';
+            modeBadge.className = 'video';
+            modeBadge.textContent = 'VIDEO';
             historyPos.textContent = '';
-        } else {
+        }} else {{
+            video.style.display = 'none';
+            screenshot.style.display = '';
             modeBadge.className = 'history';
             modeBadge.textContent = 'HISTORY';
             historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
-        }
-    }
+        }}
+    }}
 
-    function goLive() {
-        live = true;
+    function showScreenshot(frame) {{
+        screenshot.src = '/screenshot?frame=' + frame + '&s=' + sessionId;
+        frameTxt.textContent = frame;
+    }}
+
+    function goVideo() {{
+        setMode('video');
         browseIdx = -1;
-        if (history.length > 0) {
-            showFrame(history[history.length - 1]);
-        }
-        updateBadge();
-    }
+    }}
 
-    function browseBack() {
+    function browseBack() {{
         if (history.length === 0) return;
-        if (live) {
-            live = false;
-            browseIdx = history.length - 2;
-        } else {
-            browseIdx--;
-        }
-        if (browseIdx < 0) browseIdx = 0;
-        showFrame(history[browseIdx]);
-        updateBadge();
-    }
+        if (mode === 'video') {{
+            setMode('history');
+            browseIdx = history.length - 1;
+        }} else {{
+            browseIdx = Math.max(0, browseIdx - 1);
+        }}
+        showScreenshot(history[browseIdx]);
+        historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
+    }}
 
-    function browseForward() {
-        if (live || history.length === 0) return;
-        if (browseIdx < history.length - 1) {
+    function browseForward() {{
+        if (mode === 'video' || history.length === 0) return;
+        if (browseIdx < history.length - 1) {{
             browseIdx++;
-            showFrame(history[browseIdx]);
-            updateBadge();
-        }
-    }
+            showScreenshot(history[browseIdx]);
+            historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
+        }}
+    }}
 
-    document.addEventListener('keydown', function(e) {
-        if (e.key === 'ArrowLeft')  { e.preventDefault(); browseBack(); }
-        if (e.key === 'ArrowRight') { e.preventDefault(); browseForward(); }
-        if (e.key === ' ')          { e.preventDefault(); goLive(); }
-    });
+    document.addEventListener('keydown', function(e) {{
+        if (e.key === 'ArrowLeft')  {{ e.preventDefault(); browseBack(); }}
+        if (e.key === 'ArrowRight') {{ e.preventDefault(); browseForward(); }}
+        if (e.key === ' ')          {{ e.preventDefault(); goVideo(); }}
+    }});
 
-    function onFrame(frame) {
-        history.push(frame);
-        if (live) {
-            showFrame(frame);
-        }
-        updateBadge();
-    }
+    // -- Audio controls --
+    muteBtn.addEventListener('click', function() {{
+        video.muted = !video.muted;
+        muteBtn.textContent = video.muted ? 'UNMUTE' : 'MUTE';
+        muteBtn.className = video.muted ? 'muted' : '';
+        muteBtn.id = 'unmute-btn';
+    }});
 
-    function connect() {
+    volSlider.addEventListener('input', function() {{
+        video.volume = volSlider.value / 100;
+        volLabel.textContent = volSlider.value + '%';
+    }});
+
+    // -- Buffer info --
+    function updateBufferInfo() {{
+        if (video.buffered.length > 0) {{
+            var ahead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+            bufInfo.textContent = ahead.toFixed(1) + 's';
+        }}
+        requestAnimationFrame(updateBufferInfo);
+    }}
+    updateBufferInfo();
+
+    function setStatus(cls, text) {{
+        dot.className = 'dot ' + cls;
+        statusEl.textContent = text;
+    }}
+
+    // -- HLS video --
+    var hlsReady = false;
+    var retryTimer = null;
+
+    function tryLoadHls() {{
+        if (retryTimer) {{ clearTimeout(retryTimer); retryTimer = null; }}
+
+        if (Hls.isSupported()) {{
+            var hls = new Hls({{
+                liveSyncDurationCount: 3,
+                liveMaxLatencyDurationCount: 5,
+                liveDurationInfinity: true,
+                maxBufferLength: 30,
+                maxMaxBufferLength: 60,
+                enableWorker: true,
+                lowLatencyMode: false,
+            }});
+
+            hls.on(Hls.Events.MEDIA_ATTACHED, function() {{
+                hls.loadSource(hlsUrl);
+            }});
+
+            hls.on(Hls.Events.MANIFEST_PARSED, function() {{
+                hlsReady = true;
+                setStatus('buffering', 'Buffering');
+                video.play().catch(function() {{}});
+            }});
+
+            hls.on(Hls.Events.FRAG_BUFFERED, function() {{
+                if (mode === 'video') setStatus('playing', 'Playing');
+            }});
+
+            hls.on(Hls.Events.ERROR, function(event, data) {{
+                if (data.fatal) {{
+                    hls.destroy();
+                    hlsReady = false;
+                    setStatus('error', 'Stream interrupted');
+                    retryTimer = setTimeout(tryLoadHls, 3000);
+                }}
+            }});
+
+            hls.attachMedia(video);
+        }} else if (video.canPlayType('application/vnd.apple.mpegurl')) {{
+            video.src = hlsUrl;
+            video.addEventListener('loadedmetadata', function() {{
+                hlsReady = true;
+                setStatus('playing', 'Playing');
+                video.play().catch(function() {{}});
+            }});
+        }} else {{
+            setStatus('error', 'HLS not supported');
+        }}
+    }}
+
+    // Poll for HLS availability
+    function waitForHls() {{
+        setStatus('waiting', 'Waiting for stream');
+        fetch(hlsUrl, {{method: 'HEAD'}}).then(function(r) {{
+            if (r.ok) {{ tryLoadHls(); }}
+            else {{ setTimeout(waitForHls, 1000); }}
+        }}).catch(function() {{
+            setTimeout(waitForHls, 1000);
+        }});
+    }}
+    waitForHls();
+
+    // -- Commentary overlay --
+    var commentaryQueue = [];
+    var COMMENTARY_DISPLAY_SECS = 10;
+    var COMMENTARY_FADE_SECS = 0.5;
+
+    function addCommentary(streamTime, text, style) {{
+        commentaryQueue.push({{streamTime: streamTime, text: text, style: style || 'normal', shown: false}});
+    }}
+
+    function updateCommentary() {{
+        if (mode !== 'video' || !hlsReady) {{
+            requestAnimationFrame(updateCommentary);
+            return;
+        }}
+        var now = video.currentTime;
+        for (var i = 0; i < commentaryQueue.length; i++) {{
+            var c = commentaryQueue[i];
+            if (!c.shown && now >= c.streamTime) {{
+                c.shown = true;
+                c.showTime = Date.now();
+                var el = document.createElement('div');
+                el.className = 'commentary-msg ' + c.style;
+                el.textContent = c.text;
+                c.el = el;
+                overlay.appendChild(el);
+            }}
+            if (c.shown && c.el) {{
+                var elapsed = (Date.now() - c.showTime) / 1000;
+                if (elapsed > COMMENTARY_DISPLAY_SECS + COMMENTARY_FADE_SECS) {{
+                    if (c.el.parentNode) c.el.parentNode.removeChild(c.el);
+                    commentaryQueue.splice(i, 1);
+                    i--;
+                }} else if (elapsed > COMMENTARY_DISPLAY_SECS) {{
+                    c.el.classList.add('fading');
+                }}
+            }}
+        }}
+        requestAnimationFrame(updateCommentary);
+    }}
+    updateCommentary();
+
+    // -- SSE for frame updates (screenshot history) --
+    function connectFrameSSE() {{
         var es = new EventSource('/stream');
-
-        es.onopen = function() {
-            dot.className = 'dot connected';
-            statusTxt.textContent = 'Connected';
-        };
-
-        es.addEventListener('frame', function(e) {
-            onFrame(JSON.parse(e.data).frame);
-        });
-
-        es.addEventListener('init', function(e) {
+        es.addEventListener('init', function(e) {{
             var d = JSON.parse(e.data);
             sessionId = d.session || '';
-            onFrame(d.frame);
-        });
-
-        es.onerror = function() {
-            dot.className = 'dot disconnected';
-            statusTxt.textContent = 'Reconnecting\u2026';
+            history.push(d.frame);
+            frameTxt.textContent = d.frame;
+        }});
+        es.addEventListener('frame', function(e) {{
+            var d = JSON.parse(e.data);
+            history.push(d.frame);
+            if (mode === 'video') frameTxt.textContent = d.frame;
+        }});
+        es.onerror = function() {{
             es.close();
-            setTimeout(connect, 2000);
-        };
-    }
+            setTimeout(connectFrameSSE, 2000);
+        }};
+    }}
+    connectFrameSSE();
 
-    connect();
-})();
+    // -- SSE for commentary events --
+    function connectCommentarySSE() {{
+        var es = new EventSource('/commentary');
+        es.addEventListener('commentary', function(e) {{
+            var d = JSON.parse(e.data);
+            addCommentary(d.stream_time, d.text, d.style);
+        }});
+        es.onerror = function() {{
+            es.close();
+            setTimeout(connectCommentarySSE, 2000);
+        }};
+    }}
+    connectCommentarySSE();
+}})();
 </script>
 </body>
 </html>
@@ -224,9 +458,8 @@ h1 {
 
 
 class _ViewerHandler(BaseHTTPRequestHandler):
-    """Serves the viewer page, current screenshot, and SSE stream."""
+    """Serves the unified viewer page, screenshots, and SSE streams."""
 
-    # Silence per-request log lines
     def log_message(self, format, *args):
         pass
 
@@ -238,13 +471,16 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             self._serve_screenshot()
         elif path == "/stream":
             self._serve_sse()
+        elif path == "/commentary":
+            self._serve_commentary_sse()
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
     # -- endpoints ---------------------------------------------------------
 
     def _serve_html(self):
-        body = _HTML_PAGE.encode()
+        viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
+        body = _build_html(viewer._hls_port).encode()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
@@ -289,7 +525,6 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         viewer._register_client(q)
 
         try:
-            # Send current frame immediately so the page is up-to-date
             frame = viewer.get_current_frame()
             self._sse_write("init", json.dumps({"frame": frame, "session": viewer.session_id}))
 
@@ -298,13 +533,37 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                     event_data = q.get(timeout=30)
                     self._sse_write("frame", event_data)
                 except queue.Empty:
-                    # keepalive comment prevents proxy/browser timeouts
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
             viewer._unregister_client(q)
+
+    def _serve_commentary_sse(self):
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
+        q: queue.Queue[str] = queue.Queue()
+        viewer._register_commentary_client(q)
+
+        try:
+            while True:
+                try:
+                    event_data = q.get(timeout=30)
+                    self._sse_write("commentary", event_data)
+                except queue.Empty:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            viewer._unregister_commentary_client(q)
 
     def _sse_write(self, event: str, data: str):
         self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
@@ -327,7 +586,6 @@ def archive_old_screenshots(screenshots_dir: Path) -> Path | None:
         return None
 
     archive_dir = screenshots_dir / "archive"
-    # Use the oldest file's mtime as the session label
     oldest = min(files, key=lambda f: f.stat().st_mtime)
     from datetime import datetime, timezone
 
@@ -343,13 +601,14 @@ def archive_old_screenshots(screenshots_dir: Path) -> Path | None:
 
 
 class ViewerServer:
-    """Streams DS screenshots to a browser via SSE.
+    """Unified streaming viewer — HLS video + commentary overlay + screenshots.
 
     Usage::
 
         viewer = ViewerServer(holder, port=8090)
         viewer.start()          # background thread
         viewer.notify()         # call after frame changes
+        viewer.add_commentary(frame, "text", "normal")
         viewer.stop()
     """
 
@@ -358,9 +617,18 @@ class ViewerServer:
     def __init__(self, holder: EmulatorState, port: int = 8090):
         self._holder = holder
         self._port = port
+        self._hls_port = 8091  # default, updated by set_hls_port()
         self._session_id = uuid.uuid4().hex[:12]
+        self._stream_start_frame = 0
+
+        # Frame/screenshot SSE clients
         self._clients: list[queue.Queue[str]] = []
         self._clients_lock = threading.Lock()
+
+        # Commentary SSE clients
+        self._commentary_clients: list[queue.Queue[str]] = []
+        self._commentary_lock = threading.Lock()
+
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._current_screenshot: bytes | None = None
@@ -399,11 +667,16 @@ class ViewerServer:
             self._thread = None
             logger.info("Viewer stopped")
 
+    # -- configuration -----------------------------------------------------
+
+    def set_hls_port(self, port: int) -> None:
+        """Update the HLS port so the page knows where to load video from."""
+        self._hls_port = port
+
     # -- frame notification ------------------------------------------------
 
     def notify(self):
         """Capture a fresh screenshot and push an SSE event to all clients."""
-        # Grab screenshot (while caller already holds the emulator lock)
         try:
             _, data = self._holder.capture_screenshot("both", "png")
         except Exception:
@@ -414,7 +687,6 @@ class ViewerServer:
             self._current_screenshot = data
             self._screenshot_history[frame] = data
             self._history_order.append(frame)
-            # Evict oldest entries when over the cap
             while len(self._history_order) > self.MAX_HISTORY:
                 old = self._history_order.pop(0)
                 self._screenshot_history.pop(old, None)
@@ -424,13 +696,30 @@ class ViewerServer:
             for q in self._clients:
                 q.put(event_data)
 
+    # -- commentary --------------------------------------------------------
+
+    def add_commentary(self, frame: int, text: str, style: str = "normal") -> None:
+        """Push a commentary event to all connected clients."""
+        stream_time = (frame - self._stream_start_frame) / 60.0
+        event_data = json.dumps({
+            "frame": frame,
+            "text": text,
+            "style": style,
+            "stream_time": max(0.0, stream_time),
+        })
+        with self._commentary_lock:
+            for q in self._commentary_clients:
+                try:
+                    q.put_nowait(event_data)
+                except queue.Full:
+                    pass
+
     # -- helpers used by handler -------------------------------------------
 
     def get_current_screenshot(self) -> bytes | None:
         with self._screenshot_lock:
             if self._current_screenshot is not None:
                 return self._current_screenshot
-        # No cached screenshot — try to capture one now
         try:
             with self._holder.lock:
                 _, data = self._holder.capture_screenshot("both", "png")
@@ -460,3 +749,16 @@ class ViewerServer:
             except ValueError:
                 pass
         logger.info("Viewer client disconnected (%d remaining)", len(self._clients))
+
+    def _register_commentary_client(self, q: queue.Queue[str]):
+        with self._commentary_lock:
+            self._commentary_clients.append(q)
+        logger.info("Commentary client connected (%d total)", len(self._commentary_clients))
+
+    def _unregister_commentary_client(self, q: queue.Queue[str]):
+        with self._commentary_lock:
+            try:
+                self._commentary_clients.remove(q)
+            except ValueError:
+                pass
+        logger.info("Commentary client disconnected (%d remaining)", len(self._commentary_clients))

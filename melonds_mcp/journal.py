@@ -142,6 +142,15 @@ class JournalWriter:
         entry = json.dumps({"type": "load_rom", "rom_path": rom_path})
         self._queue.put(entry)
 
+    def write_sync(self, state_path: str) -> None:
+        """Write a sync entry. Blocks until queued (never dropped).
+
+        The renderer loads this savestate to jump ahead when it falls
+        too far behind the main emulator.
+        """
+        entry = json.dumps({"type": "sync", "state_path": state_path})
+        self._queue.put(entry)  # blocking
+
     def write_shutdown(self) -> None:
         """Write a shutdown entry. Blocks until queued (never dropped)."""
         entry = json.dumps({"type": "shutdown"})

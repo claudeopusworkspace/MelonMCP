@@ -37,6 +37,95 @@ def _with_lock(holder: EmulatorState):
         return wrapper
     return decorator
 
+
+# ── Stream catchup ──────────────────────────────────────────────
+
+_CATCHUP_MAX_GAP = 1800    # 30s * 60fps — max frames renderer may lag
+_CATCHUP_TIMEOUT = 60      # seconds to wait before giving up
+_RESYNC_THRESHOLD = 3600   # 60s behind triggers a savestate resync
+
+# Tools that advance emulation frames and should wait for the renderer.
+_CATCHUP_TOOLS = {
+    "advance_frames", "advance_frames_until",
+    "press_buttons", "tap_touch_screen", "run_macro",
+}
+
+
+def _wait_for_stream_catchup(holder: EmulatorState, timeout: int = _CATCHUP_TIMEOUT) -> None:
+    """Block until the renderer is within 30 s of the main emulator frame.
+
+    Called *after* releasing the emulator lock so other tools can proceed.
+    No-op when no renderer is running.
+    """
+    proc = getattr(holder, "_renderer_proc", None)
+    if proc is None or proc.poll() is not None:
+        return
+
+    frame_file = holder.data_dir / ".renderer_frame"
+    deadline = time.monotonic() + timeout
+    resync_sent = False
+
+    while time.monotonic() < deadline:
+        try:
+            data = json.loads(frame_file.read_text())
+            renderer_frame = data["emulator_frame"]
+            gap = holder.frame_count - renderer_frame
+            if gap <= _CATCHUP_MAX_GAP:
+                return
+            # If far behind and we haven't resynced yet, trigger one
+            if gap > _RESYNC_THRESHOLD and not resync_sent:
+                _trigger_resync(holder)
+                resync_sent = True
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+        # Re-check renderer health each iteration
+        if proc.poll() is not None:
+            return
+        time.sleep(0.5)
+
+    logger.warning(
+        "Stream catchup timed out (main_frame=%d, timeout=%ds)",
+        holder.frame_count, timeout,
+    )
+
+
+def _trigger_resync(holder: EmulatorState) -> None:
+    """Save state and send a sync entry so the renderer can jump ahead."""
+    journal = getattr(holder, "_journal", None)
+    if journal is None:
+        return
+    sync_path = str(holder.data_dir / ".renderer_sync.mst")
+    with holder.lock:
+        if holder.emu is not None:
+            holder.emu.savestate_save(sync_path)
+    journal.write_sync(sync_path)
+    logger.info("Triggered renderer resync at frame %d", holder.frame_count)
+
+
+def _with_lock_and_catchup(holder: EmulatorState):
+    """Lock wrapper that also waits for stream catchup after execution.
+
+    The emulator lock is held during execution, then released before the
+    catchup poll so other tools aren't blocked while we wait.
+    """
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            t0 = time.monotonic()
+            with holder.lock:
+                lock_wait = time.monotonic() - t0
+                if lock_wait > 0.1:
+                    logger.warning(
+                        "MCP lock contention: waited %.3fs for lock (tool=%s)",
+                        lock_wait, fn.__name__,
+                    )
+                result = fn(*args, **kwargs)
+            _wait_for_stream_catchup(holder)
+            return result
+        return wrapper
+    return decorator
+
+
 # Limits
 MAX_ADVANCE_FRAMES = 3600  # 60 seconds at 60fps
 MAX_MEMORY_READ_COUNT = 4096
@@ -80,8 +169,15 @@ def _start_bridge(holder: EmulatorState) -> str | None:
     return path
 
 
+_JOURNAL_CHUNK_SIZE = 60  # 1 second of frames per journal entry
+
+
 def _journal_write(holder: EmulatorState, method: str, **kwargs) -> None:
-    """Write a journal entry if the journal is active. Check renderer health."""
+    """Write a journal entry if the journal is active. Check renderer health.
+
+    Large frame entries are automatically chunked into 60-frame (1 second)
+    entries so the renderer can report fine-grained progress.
+    """
     j = getattr(holder, "_journal", None)
     if j is None:
         return
@@ -93,6 +189,19 @@ def _journal_write(holder: EmulatorState, method: str, **kwargs) -> None:
         j.stop()
         holder._journal = None
         return
+
+    # Chunk large frame writes for finer-grained renderer progress
+    if method == "write_frames" and kwargs.get("count", 1) > _JOURNAL_CHUNK_SIZE:
+        count = kwargs["count"]
+        buttons = kwargs.get("buttons")
+        touch_x = kwargs.get("touch_x")
+        touch_y = kwargs.get("touch_y")
+        while count > 0:
+            chunk = min(count, _JOURNAL_CHUNK_SIZE)
+            j.write_frames(chunk, buttons, touch_x, touch_y)
+            count -= chunk
+        return
+
     getattr(j, method)(**kwargs)
 
 
@@ -215,12 +324,16 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     journal.start()
     holder._journal = journal
 
+    # Record the starting frame so commentary stream_time can be computed
+    holder._stream_start_frame = holder.frame_count
+
     # Launch renderer subprocess
     cmd = [
         sys.executable, "-m", "melonds_mcp.renderer",
         "--journal-sock", journal_sock,
         "--rom", holder.rom_path,
         "--port", str(port),
+        "--data-dir", str(holder.data_dir),
     ]
     if initial_state:
         cmd += ["--initial-state", initial_state]
@@ -232,6 +345,13 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     logger.info(
         "Renderer subprocess launched (pid=%d, port=%d)", renderer_proc.pid, port,
     )
+
+    # Tell the viewer about the HLS port so the unified page can load video
+    viewer = getattr(holder, "_viewer", None)
+    if viewer is not None:
+        viewer.set_hls_port(port)
+        viewer._stream_start_frame = holder.frame_count
+
     return {
         "success": True,
         "message": f"HLS video stream started on port {port} (renderer pid={renderer_proc.pid}).",
@@ -275,6 +395,29 @@ def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
     holder._journal = None
     holder._renderer_proc = None
     return {"success": True, "message": "Video stream stopped."}
+
+
+_COMMENTARY_STYLES = {"normal", "excited", "whisper"}
+
+
+def _tool_send_commentary(
+    holder: EmulatorState, text: str, style: str = "normal",
+) -> dict[str, Any]:
+    """Send commentary text to the stream overlay."""
+    if style not in _COMMENTARY_STYLES:
+        raise ValueError(f"Invalid style: {style!r}. Must be one of {sorted(_COMMENTARY_STYLES)}.")
+    if not text.strip():
+        raise ValueError("Commentary text must not be empty.")
+
+    frame = holder.frame_count
+    viewer = getattr(holder, "_viewer", None)
+    if viewer is not None:
+        viewer.add_commentary(frame, text, style)
+        logger.info("Commentary at frame %d: %s", frame, text[:80])
+        return {"success": True, "frame": frame, "style": style}
+    else:
+        logger.warning("send_commentary called but no viewer running")
+        return {"success": False, "message": "No viewer running. Start the viewer first."}
 
 
 def _tool_advance_frames(
@@ -1317,6 +1460,7 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
     holder = EmulatorState(data_dir=data_dir or Path.cwd())
     holder._journal = None
     holder._renderer_proc = None
+    holder._stream_start_frame = 0
 
     mcp = FastMCP(name="melonDS MCP")
 
@@ -1370,6 +1514,20 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
     def stop_video_stream() -> dict[str, Any]:
         """Stop the HLS video stream and shut down the rendering process."""
         return _tool_stop_video_stream(holder)
+
+    @mcp.tool()
+    def send_commentary(text: str, style: str = "normal") -> dict[str, Any]:
+        """Send commentary text to appear as an overlay on the video stream.
+
+        Commentary syncs to the current game frame and displays when viewers
+        reach that point in the stream. Use this to narrate gameplay decisions,
+        explain strategy, or react to events.
+
+        Args:
+            text: The commentary text to display.
+            style: Display style — "normal", "excited", or "whisper".
+        """
+        return _tool_send_commentary(holder, text, style)
 
     @mcp.tool()
     def advance_frames(
@@ -1852,8 +2010,13 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
     # Tools in _SELF_LOCKING_TOOLS manage their own lock acquisition (e.g.
     # load_state acquires inside a worker thread so the timeout can fire).
     lock_wrap = _with_lock(holder)
+    catchup_wrap = _with_lock_and_catchup(holder)
     for name, tool in mcp._tool_manager._tools.items():
-        if name not in _SELF_LOCKING_TOOLS:
+        if name in _SELF_LOCKING_TOOLS:
+            pass  # manages own lock acquisition
+        elif name in _CATCHUP_TOOLS:
+            tool.fn = catchup_wrap(tool.fn)
+        else:
             tool.fn = lock_wrap(tool.fn)
 
     return mcp

@@ -4,19 +4,19 @@ Port of the DeSmuME MCP server to melonDS for JIT-enabled DS emulation.
 
 ## Status
 
-**Core port complete.** The C shim, ctypes wrapper, and all Python layers have been ported. JIT is confirmed working. 76 unit tests passing.
+**Core port complete.** The C shim, ctypes wrapper, and all Python layers have been ported. JIT is confirmed working. 133 unit tests passing.
 
 ### What's done
 - `shim/melonds_shim.cpp` — extern "C" wrapper (lifecycle, display, input, savestates, memory, audio, save data, JIT)
 - `shim/platform_stubs.cpp` — Platform.h implementations (file I/O, threading, logging, save callbacks, no-op multimedia stubs)
 - `shim/CMakeLists.txt` — builds `libmelonds.so` linking melonDS core as static lib
 - `melonds_mcp/` — full Python package (14 modules: libmelonds, emulator, server, bridge, client, journal, renderer, streamer, viewer, constants, settings, __main__)
-- `tests/` — 76 tests passing (constants, checkpoints, macros, watches)
+- `tests/` — 133 tests passing (constants, checkpoints, macros, watches, advance_frames_until)
 - Build automation (`scripts/build_libmelonds.sh`)
+- Streaming rework: unified viewer, commentary overlay, stream-paced tool calls
 
 ### What's not done yet
 - End-to-end testing with a real ROM
-- HLS streaming verification
 - Investigate Woj's previously observed image artifacting
 
 ## Motivation
@@ -27,8 +27,12 @@ DeSmuME's x86 JIT is disabled by default and documented as buggy (unmaintained s
 
 ```
 MCP tools (server.py)  →  EmulatorState (emulator.py)  →  ctypes wrapper (libmelonds.py)  →  libmelonds.so
-Bridge (bridge.py)  ↗       ↑ Journal (journal.py) → Renderer (renderer.py)
+Bridge (bridge.py)  ↗       ↑ Journal (journal.py) → Renderer (renderer.py) → HLSStreamer (streamer.py)
+                                                        ↑ position file ↓
+Viewer (viewer.py, port 8090): Unified page with HLS video + commentary overlay + screenshot debug
 ```
+
+**Streaming architecture:** The main emulator processes MCP commands at full speed and journals actions to a renderer subprocess via Unix socket. The renderer replays frames one-at-a-time (no render skipping) and pipes them through ffmpeg to produce HLS segments (port 8091). The unified viewer page (port 8090) loads HLS video cross-origin and receives commentary events via SSE. Frame-advancing tools block until the renderer catches up to within 30 seconds. If the renderer falls 60+ seconds behind, a savestate resync is triggered automatically.
 
 The C shim (`shim/melonds_shim.cpp`) wraps the melonDS `NDS` C++ class as a flat C API. Platform callbacks (`shim/platform_stubs.cpp`) provide file I/O, threading, and save data persistence.
 

@@ -31,268 +31,15 @@ _FPS = 60
 _SAMPLES_PER_FRAME = _SAMPLE_RATE // _FPS  # 800
 _MAX_BUFFER_SECS = 30.0  # max seconds content can lead wall-clock before throttling
 
-_HTML_PAGE = """\
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>melonDS Stream</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-    background: #111;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 100vh;
-    font-family: 'Courier New', monospace;
-    color: #e0e0e0;
-}
-#container {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 12px;
-}
-video {
-    image-rendering: pixelated;
-    border: 2px solid #333;
-    border-radius: 4px;
-    width: 512px;
-    height: 768px;
-    background: #000;
-}
-h1 {
-    font-size: 16px;
-    font-weight: normal;
-    color: #666;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-}
-#status-bar {
-    display: flex;
-    gap: 24px;
-    font-size: 14px;
-    color: #888;
-}
-.dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    margin-right: 6px;
-    vertical-align: middle;
-}
-.dot.buffering { background: #ff9800; }
-.dot.playing   { background: #4caf50; }
-.dot.error     { background: #f44336; }
-.dot.waiting   { background: #666; }
-#unmute-btn {
-    padding: 6px 16px;
-    border: 1px solid #555;
-    border-radius: 4px;
-    background: #2e7d32;
-    color: #fff;
-    font-family: inherit;
-    font-size: 13px;
-    cursor: pointer;
-    letter-spacing: 1px;
-}
-#unmute-btn:hover { background: #388e3c; }
-#unmute-btn.muted { background: #c62828; }
-#volume-slider {
-    width: 80px;
-    vertical-align: middle;
-    cursor: pointer;
-    accent-color: #4caf50;
-}
-#vol-label { font-size: 12px; color: #888; }
-</style>
-</head>
-<body>
-<div id="container">
-    <h1>melonDS Stream</h1>
-    <video id="player" muted autoplay></video>
-    <div id="status-bar">
-        <span><span id="dot" class="dot waiting"></span><span id="status">Waiting for stream\u2026</span></span>
-        <button id="unmute-btn" class="muted">UNMUTE</button>
-        <input id="volume-slider" type="range" min="0" max="100" value="50">
-        <span id="vol-label">50%</span>
-        <span>Buffer: <span id="buffer-info">\u2014</span></span>
-    </div>
-</div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<script>
-(function() {
-    var video    = document.getElementById('player');
-    var dot      = document.getElementById('dot');
-    var status   = document.getElementById('status');
-    var bufInfo  = document.getElementById('buffer-info');
-    var muteBtn  = document.getElementById('unmute-btn');
-    var volSlider = document.getElementById('volume-slider');
-    var volLabel  = document.getElementById('vol-label');
-
-    video.volume = 0.5;
-    var BUFFER_TARGET_SECS = 30;
-    var BUFFER_MAX_WAIT_MS = 120000;  // 2 minutes
-    var bufferingGate = false;
-    var bufferGateStart = 0;
-    var bufferCheckTimer = null;
-    var lastFragTime = 0;
-
-    function getBufferedAhead() {
-        if (video.buffered.length === 0) return 0;
-        return video.buffered.end(video.buffered.length - 1) - video.currentTime;
-    }
-
-    function enterBufferingGate() {
-        bufferingGate = true;
-        bufferGateStart = Date.now();
-        video.pause();
-        setStatus('buffering', 'Buffering\u2026 0s');
-        if (!bufferCheckTimer) {
-            bufferCheckTimer = setInterval(tryExitBufferingGate, 1000);
-        }
-    }
-
-    function tryExitBufferingGate() {
-        if (!bufferingGate) return;
-        var ahead = getBufferedAhead();
-        var waited = Date.now() - bufferGateStart;
-        if (ahead >= BUFFER_TARGET_SECS || waited >= BUFFER_MAX_WAIT_MS) {
-            bufferingGate = false;
-            if (bufferCheckTimer) { clearInterval(bufferCheckTimer); bufferCheckTimer = null; }
-            video.play().catch(function() {});
-            setStatus('playing', 'Playing');
-        } else {
-            setStatus('buffering', 'Buffering\u2026 ' + Math.floor(ahead) + 's');
-        }
-    }
-
-    muteBtn.addEventListener('click', function() {
-        video.muted = !video.muted;
-        muteBtn.textContent = video.muted ? 'UNMUTE' : 'MUTE';
-        muteBtn.className = video.muted ? 'muted' : '';
-        muteBtn.id = 'unmute-btn';
-    });
-
-    volSlider.addEventListener('input', function() {
-        video.volume = volSlider.value / 100;
-        volLabel.textContent = volSlider.value + '%';
-    });
-
-    function updateBufferInfo() {
-        if (video.buffered.length > 0) {
-            var buffered = video.buffered.end(video.buffered.length - 1);
-            var behind = buffered - video.currentTime;
-            bufInfo.textContent = behind.toFixed(1) + 's';
-        }
-        requestAnimationFrame(updateBufferInfo);
-    }
-    updateBufferInfo();
-
-    function setStatus(cls, text) {
-        dot.className = 'dot ' + cls;
-        status.textContent = text;
-    }
-
-    var playlistUrl = '/hls/stream.m3u8';
-    var retryTimer = null;
-
-    function tryLoad() {
-        if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-
-        if (Hls.isSupported()) {
-            var hls = new Hls({
-                liveSyncDurationCount: 300,
-                liveMaxLatencyDurationCount: 600,
-                enableWorker: true,
-                lowLatencyMode: false,
-            });
-
-            hls.on(Hls.Events.MEDIA_ATTACHED, function() {
-                hls.loadSource(playlistUrl);
-            });
-
-            hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                enterBufferingGate();
-            });
-
-            hls.on(Hls.Events.FRAG_BUFFERED, function() {
-                lastFragTime = Date.now();
-                if (bufferingGate) {
-                    tryExitBufferingGate();
-                } else {
-                    setStatus('playing', 'Playing');
-                }
-            });
-
-            hls.on(Hls.Events.ERROR, function(event, data) {
-                if (data.fatal) {
-                    hls.destroy();
-                    setStatus('error', 'Stream interrupted \u2014 retrying\u2026');
-                    retryTimer = setTimeout(tryLoad, 3000);
-                }
-            });
-
-            // Proactively enter the gate before the buffer fully empties
-            // to prevent hls.js from looping back in the live window.
-            video.addEventListener('timeupdate', function() {
-                if (!bufferingGate && lastFragTime && (Date.now() - lastFragTime) > 3000 && getBufferedAhead() < 2) {
-                    enterBufferingGate();
-                }
-            });
-
-            // Fallback: catch full buffer exhaustion if timeupdate missed it.
-            video.addEventListener('waiting', function() {
-                if (!bufferingGate && lastFragTime && (Date.now() - lastFragTime) > 3000) {
-                    enterBufferingGate();
-                }
-            });
-
-            hls.attachMedia(video);
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            // Safari native HLS
-            video.src = playlistUrl;
-            video.addEventListener('loadedmetadata', function() {
-                setStatus('playing', 'Playing');
-                video.play().catch(function() {});
-            });
-        } else {
-            setStatus('error', 'HLS not supported in this browser');
-        }
-    }
-
-    // Poll for playlist availability before starting
-    function waitForStream() {
-        setStatus('waiting', 'Waiting for stream\u2026');
-        fetch(playlistUrl, {method: 'HEAD'}).then(function(r) {
-            if (r.ok) { tryLoad(); }
-            else { setTimeout(waitForStream, 1000); }
-        }).catch(function() {
-            setTimeout(waitForStream, 1000);
-        });
-    }
-    waitForStream();
-})();
-</script>
-</body>
-</html>
-"""
-
-
 class _StreamHandler(BaseHTTPRequestHandler):
-    """Serves the HLS player page and proxies HLS segment files."""
+    """Serves HLS segment files only — the viewer page lives in viewer.py."""
 
     def log_message(self, format, *args):
         pass  # silence per-request logs
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path == "/":
-            self._serve_html()
-        elif path.startswith("/hls/"):
+        if path.startswith("/hls/"):
             self._serve_hls_file(path[5:])  # strip /hls/ prefix
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -303,14 +50,6 @@ class _StreamHandler(BaseHTTPRequestHandler):
             self._serve_hls_file(path[5:], head_only=True)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
-
-    def _serve_html(self):
-        body = _HTML_PAGE.encode()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", len(body))
-        self.end_headers()
-        self.wfile.write(body)
 
     def _serve_hls_file(self, filename: str, head_only: bool = False):
         streamer: HLSStreamer = self.server.streamer  # type: ignore[attr-defined]
@@ -467,7 +206,7 @@ class HLSStreamer:
             # timing (MPEG-TS loses ~23ms per segment at AAC frame boundaries)
             "-f", "hls",
             "-hls_time", "2",
-            "-hls_list_size", "20",
+            "-hls_list_size", "10",
             "-hls_flags", "delete_segments+append_list",
             "-hls_segment_type", "fmp4",
             "-hls_fmp4_init_filename", "init.mp4",
