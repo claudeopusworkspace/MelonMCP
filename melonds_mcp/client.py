@@ -77,6 +77,37 @@ class EmulatorClient:
             params["touch_y"] = touch_y
         return self._call("advance_frames", **params)
 
+    def advance_frames_until(
+        self,
+        max_frames: int,
+        conditions: list[dict],
+        poll_interval: int = 1,
+        buttons: list[str] | None = None,
+        touch_x: int | None = None,
+        touch_y: int | None = None,
+        read_addresses: list[dict] | None = None,
+    ) -> dict:
+        """Advance up to max_frames, returning early when a memory condition is met.
+
+        Runs the poll loop internally at full emulator speed, eliminating
+        round-trip overhead. Returns dict with triggered, condition_index,
+        frames_elapsed, total_frame, and optional reads.
+        """
+        params: dict[str, Any] = {
+            "max_frames": max_frames,
+            "conditions": conditions,
+            "poll_interval": poll_interval,
+        }
+        if buttons:
+            params["buttons"] = buttons
+        if touch_x is not None:
+            params["touch_x"] = touch_x
+        if touch_y is not None:
+            params["touch_y"] = touch_y
+        if read_addresses:
+            params["read_addresses"] = read_addresses
+        return self._call("advance_frames_until", **params)
+
     def advance_frame(self, buttons: list[str] | None = None,
                       touch_x: int | None = None, touch_y: int | None = None) -> dict:
         """Advance one frame."""
