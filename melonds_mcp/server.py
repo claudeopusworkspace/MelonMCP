@@ -248,18 +248,10 @@ def _tool_load_rom(holder: EmulatorState, rom_path: str, name: str = "unnamed") 
     msg = holder.load_rom(rom_path)
     result: dict[str, Any] = {"success": True, "rom_path": holder.rom_path, "message": msg}
 
-    # Auto-start viewer or streamer based on settings
-    from .settings import get_auto_start
+    # Auto-start viewer + stream + recording if enabled
+    from .settings import get_stream
 
-    auto = get_auto_start()
-    if auto == "viewer":
-        auto_result = _tool_start_viewer(holder)
-        result["auto_started"] = "viewer"
-        result["viewer_url"] = auto_result.get("url")
-    elif auto == "stream":
-        # Start both the viewer (unified page on 8090) and the HLS
-        # stream (segments on 8091) — the viewer page loads video from
-        # the stream server cross-origin.
+    if get_stream():
         viewer_result = _tool_start_viewer(holder)
         stream_result = _tool_start_video_stream(holder, name=name)
         result["auto_started"] = "stream"
@@ -343,8 +335,8 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091, name: str 
     if initial_state:
         cmd += ["--initial-state", initial_state]
 
-    from .settings import get_record
-    if get_record():
+    from .settings import get_stream
+    if get_stream():
         recordings_dir = holder.data_dir / "recordings"
         recordings_dir.mkdir(exist_ok=True)
         cmd += ["--record-dir", str(recordings_dir), "--record-name", name]

@@ -9,8 +9,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_VALID_AUTO_START = {"none", "viewer", "stream"}
-
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_PATH = _PROJECT_ROOT / "settings.default.json"
 _USER_PATH = _PROJECT_ROOT / "settings.json"
@@ -38,20 +36,7 @@ def load_settings() -> dict[str, Any]:
     return settings
 
 
-def get_auto_start() -> str:
-    """Return the auto_start setting: "none", "viewer", or "stream"."""
+def get_stream() -> bool:
+    """Return the stream setting: whether to auto-start viewer, HLS stream, and recording on ROM load."""
     settings = load_settings()
-    value = settings.get("auto_start", "none")
-    if value not in _VALID_AUTO_START:
-        logger.warning(
-            "Invalid auto_start value %r (expected one of %s), defaulting to 'none'",
-            value, _VALID_AUTO_START,
-        )
-        return "none"
-    return value
-
-
-def get_record() -> bool:
-    """Return the record setting: whether to record sessions as MP4."""
-    settings = load_settings()
-    return bool(settings.get("record", False))
+    return bool(settings.get("stream", False))
