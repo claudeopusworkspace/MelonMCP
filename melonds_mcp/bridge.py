@@ -67,6 +67,8 @@ class BridgeServer:
             "revert_to_checkpoint": self._revert_to_checkpoint,
             "save_checkpoint": self._save_checkpoint,
             "set_stream_config": self._set_stream_config,
+            "start_video_stream": self._start_video_stream,
+            "stop_video_stream": self._stop_video_stream,
         }
 
     # -- Journal helper --
@@ -283,6 +285,14 @@ class BridgeServer:
         from .settings import get_stream, set_stream_override
         set_stream_override(enabled)
         return {"override": enabled, "effective": get_stream()}
+
+    def _start_video_stream(self, name: str = "unnamed", port: int = 18091) -> dict:
+        from .server import _tool_start_video_stream
+        return _tool_start_video_stream(self._holder, port=port, name=name)
+
+    def _stop_video_stream(self) -> dict:
+        from .server import _tool_stop_video_stream
+        return _tool_stop_video_stream(self._holder)
 
     # -- Server lifecycle --
 

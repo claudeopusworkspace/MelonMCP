@@ -209,6 +209,18 @@ class EmulatorClient:
         """
         return self._call("set_stream_config", enabled=enabled)
 
+    def start_video_stream(self, name: str = "unnamed", port: int = 18091) -> dict:
+        """Start the HLS video stream (launches the renderer subprocess)."""
+        return self._call("start_video_stream", name=name, port=port)
+
+    def stop_video_stream(self) -> dict:
+        """Stop the HLS video stream and kill the renderer subprocess.
+
+        Idempotent — returns success with a "No video stream running." message
+        if no stream is active.
+        """
+        return self._call("stop_video_stream")
+
     def get_screenshot(self, screen: str = "both", fmt: str = "png") -> tuple[str, bytes]:
         """Capture screenshot. Returns (mime_type, image_bytes)."""
         import base64
