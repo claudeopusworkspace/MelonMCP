@@ -200,6 +200,15 @@ class EmulatorClient:
         """Save a checkpoint as a permanent named savestate without loading it."""
         return self._call("save_checkpoint", checkpoint_id=checkpoint_id, name=name)
 
+    def set_stream_config(self, enabled: bool | None = None) -> dict:
+        """Override the stream setting for the life of the server process.
+
+        enabled=True/False forces streaming on/off; enabled=None clears the
+        override so the env-var + settings.json chain takes over again.
+        Returns {"override": <bool|None>, "effective": <bool>}.
+        """
+        return self._call("set_stream_config", enabled=enabled)
+
     def get_screenshot(self, screen: str = "both", fmt: str = "png") -> tuple[str, bytes]:
         """Capture screenshot. Returns (mime_type, image_bytes)."""
         import base64

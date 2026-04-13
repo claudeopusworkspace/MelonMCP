@@ -66,6 +66,7 @@ class BridgeServer:
             "list_checkpoints": self._list_checkpoints,
             "revert_to_checkpoint": self._revert_to_checkpoint,
             "save_checkpoint": self._save_checkpoint,
+            "set_stream_config": self._set_stream_config,
         }
 
     # -- Journal helper --
@@ -277,6 +278,11 @@ class BridgeServer:
                 "action": cp.action,
             },
         }
+
+    def _set_stream_config(self, enabled: bool | None = None) -> dict:
+        from .settings import get_stream, set_stream_override
+        set_stream_override(enabled)
+        return {"override": enabled, "effective": get_stream()}
 
     # -- Server lifecycle --
 
