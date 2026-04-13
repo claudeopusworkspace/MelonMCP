@@ -1,14 +1,13 @@
-"""Unified streaming viewer — HLS video + commentary overlay + screenshot debug.
+"""Streaming viewer — HLS video + commentary, with separate snapshots page.
 
-Serves a single page that combines:
-- HLS video playback (segments loaded from the renderer's HTTP server)
-- Commentary overlay synced to video playback position
-- Screenshot history browsing (debug mode)
-- Status bar with connection info, buffer, and frame counters
+Pages:
+- /           — HLS video playback with commentary overlay
+- /snapshots  — Auto-updating screenshots with history browsing (debug)
+- /recordings — Redirects to standalone recording server (port 8091)
 
 SSE endpoints:
-- /stream  — frame update notifications (existing, kept for screenshot updates)
-- /commentary — commentary events with frame-synced timing
+- /stream  — frame update notifications (used by /snapshots page)
+- /commentary — commentary events with frame-synced timing (used by / page)
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_html(hls_port: int, stream_start_ms: int = 0) -> str:
-    """Build the unified viewer HTML with the HLS port baked in."""
+    """Build the video stream page HTML with the HLS port baked in."""
     return f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -69,15 +68,6 @@ video {{
     height: 100%;
     background: #000;
 }}
-#screenshot {{
-    image-rendering: pixelated;
-    border: 2px solid #333;
-    border-radius: 4px;
-    width: 100%;
-    height: 100%;
-    background: #000;
-    display: none;
-}}
 #commentary-overlay {{
     position: absolute;
     bottom: 24px;
@@ -101,7 +91,6 @@ video {{
     line-height: 1.4;
     animation: fadeIn 0.3s ease-out;
     transition: opacity 0.5s ease-out;
-    /* Clamp to 3 lines max, ellipsis on overflow */
     display: -webkit-box;
     -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
@@ -130,6 +119,8 @@ h1 {{
     letter-spacing: 2px;
     text-transform: uppercase;
 }}
+a {{ color: #4caf50; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
 #status-bar {{
     display: flex;
     flex-wrap: wrap;
@@ -141,7 +132,7 @@ h1 {{
 #status-bar span {{
     white-space: nowrap;
 }}
-#stream-time, #buffer-info, #frame-count {{
+#stream-time, #buffer-info {{
     display: inline-block;
     min-width: 4.5em;
     text-align: right;
@@ -159,16 +150,6 @@ h1 {{
 .dot.playing   {{ background: #4caf50; }}
 .dot.error     {{ background: #f44336; }}
 .dot.waiting   {{ background: #666; }}
-.dot.connected {{ background: #4caf50; }}
-#mode-badge {{
-    padding: 1px 8px;
-    border-radius: 3px;
-    font-size: 11px;
-    font-weight: bold;
-    letter-spacing: 1px;
-}}
-#mode-badge.video   {{ background: #2e7d32; color: #c8e6c9; }}
-#mode-badge.history {{ background: #e65100; color: #ffe0b2; }}
 #unmute-btn {{
     padding: 4px 12px;
     border: 1px solid #555;
@@ -189,8 +170,8 @@ h1 {{
     accent-color: #4caf50;
 }}
 #vol-label {{ font-size: 11px; color: #888; }}
-#hint {{
-    font-size: 11px;
+.nav-links {{
+    font-size: 12px;
     color: #555;
 }}
 /* -- Commentary sidebar -- */
@@ -258,22 +239,22 @@ h1 {{
     <h1>melonDS Stream</h1>
     <div id="video-wrap">
         <video id="player" muted autoplay></video>
-        <img id="screenshot" alt="DS Screen">
         <div id="commentary-overlay"></div>
     </div>
     <div id="status-bar">
         <span><span id="dot" class="dot waiting"></span><span id="status">Waiting</span></span>
-        <span id="mode-badge" class="video">VIDEO</span>
         <button id="unmute-btn" class="muted">UNMUTE</button>
         <input id="volume-slider" type="range" min="0" max="100" value="50">
         <span id="vol-label">50%</span>
         <span>Time: <span id="stream-time">&mdash;</span></span>
         <span>Buffer: <span id="buffer-info">&mdash;</span></span>
-        <span>Frame: <span id="frame-count">&mdash;</span></span>
-        <span id="history-pos"></span>
     </div>
-    <div id="hint">Arrow keys: browse screenshots &middot; Space: return to video</div>
+    <div class="nav-links">
+        <a href="/snapshots">Snapshots</a> &middot;
+        <a class="rec-link" href="/recordings">Recordings</a>
+    </div>
 </div>
+<script>document.querySelectorAll('a.rec-link').forEach(function(a){{a.href=location.protocol+'//'+location.hostname+':8091/recordings';}});</script>
 <button id="sidebar-toggle">COMMENTARY</button>
 <div id="commentary-sidebar">
     <h2>Commentary</h2>
@@ -282,7 +263,6 @@ h1 {{
 <script>
 (function() {{
     var video      = document.getElementById('player');
-    var screenshot = document.getElementById('screenshot');
     var dot        = document.getElementById('dot');
     var statusEl   = document.getElementById('status');
     var bufInfo    = document.getElementById('buffer-info');
@@ -290,76 +270,13 @@ h1 {{
     var volSlider  = document.getElementById('volume-slider');
     var volLabel   = document.getElementById('vol-label');
     var streamTime = document.getElementById('stream-time');
-    var frameTxt   = document.getElementById('frame-count');
-    var modeBadge  = document.getElementById('mode-badge');
-    var historyPos = document.getElementById('history-pos');
     var overlay    = document.getElementById('commentary-overlay');
 
     var HLS_PORT = {hls_port};
     var STREAM_START_MS = {stream_start_ms};
     var hlsBaseUrl = 'http://' + location.hostname + ':' + HLS_PORT + '/hls/';
 
-    // -- Mode: video or history (screenshot browsing) --
-    var mode = 'video';
-    var history = [];
-    var browseIdx = -1;
-    var sessionId = '';
-
     video.volume = 0.5;
-
-    function setMode(m) {{
-        mode = m;
-        if (m === 'video') {{
-            video.style.display = '';
-            screenshot.style.display = 'none';
-            modeBadge.className = 'video';
-            modeBadge.textContent = 'VIDEO';
-            historyPos.textContent = '';
-        }} else {{
-            video.style.display = 'none';
-            screenshot.style.display = '';
-            modeBadge.className = 'history';
-            modeBadge.textContent = 'HISTORY';
-            historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
-        }}
-    }}
-
-    function showScreenshot(frame) {{
-        screenshot.src = '/screenshot?frame=' + frame + '&s=' + sessionId;
-        frameTxt.textContent = frame;
-    }}
-
-    function goVideo() {{
-        setMode('video');
-        browseIdx = -1;
-    }}
-
-    function browseBack() {{
-        if (history.length === 0) return;
-        if (mode === 'video') {{
-            setMode('history');
-            browseIdx = history.length - 1;
-        }} else {{
-            browseIdx = Math.max(0, browseIdx - 1);
-        }}
-        showScreenshot(history[browseIdx]);
-        historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
-    }}
-
-    function browseForward() {{
-        if (mode === 'video' || history.length === 0) return;
-        if (browseIdx < history.length - 1) {{
-            browseIdx++;
-            showScreenshot(history[browseIdx]);
-            historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
-        }}
-    }}
-
-    document.addEventListener('keydown', function(e) {{
-        if (e.key === 'ArrowLeft')  {{ e.preventDefault(); browseBack(); }}
-        if (e.key === 'ArrowRight') {{ e.preventDefault(); browseForward(); }}
-        if (e.key === ' ')          {{ e.preventDefault(); goVideo(); }}
-    }});
 
     // -- Audio controls --
     muteBtn.addEventListener('click', function() {{
@@ -407,10 +324,6 @@ h1 {{
     }}
 
     // -- MSE video loader --
-    // Custom Media Source Extensions loader that feeds fMP4 segments
-    // directly to the browser.  On buffer empty the video just pauses;
-    // when new segments arrive, playback resumes.  No third-party
-    // player library making seek decisions.
     var mseReady = false;
     var lastSegmentName = null;
     var initFetched = false;
@@ -421,15 +334,9 @@ h1 {{
     var appending = false;
     var pollTimer = null;
 
-    // Wall-clock live tracking — we record the video position and
-    // real time at the moment we seek to live, then compute where
-    // the viewer "should" be as: origin_pos + elapsed_real_time.
-    // This targets position #3 (wall-clock) not #2 (render edge).
-    var liveOriginTime = null;     // Date.now() when we seeked to live
-    var liveOriginPosition = null; // video.currentTime at that moment
-    var LIVE_EDGE_TARGET = 3;      // initial seek: seconds behind buffer end
-    var LIVE_DRIFT_THRESHOLD = 2;  // nudge when drifted more than this
-    var LIVE_DRIFT_CLOSE = 0.5;    // close enough — stay at 1.0x
+    var liveOriginTime = null;
+    var liveOriginPosition = null;
+    var LIVE_DRIFT_THRESHOLD = 2;
 
     function parseM3u8(text) {{
         var initUri = null, segments = [], ended = false;
@@ -482,9 +389,6 @@ h1 {{
                 initFetched = true;
                 fetchAndAppend(hlsBaseUrl + p.initUri);
             }}
-            // Name-based tracking for sliding window compatibility —
-            // the playlist rotates old segments out, so index-based
-            // tracking would re-fetch or miss segments.
             var segsToFetch;
             if (lastSegmentName === null) {{
                 segsToFetch = p.segments;
@@ -530,43 +434,28 @@ h1 {{
 
             sourceBuffer.addEventListener('updateend', function() {{
                 appending = false;
-                // Seek to wall-clock position once initial segments load.
-                // Wall-clock = how many real seconds have elapsed since
-                // the stream started.  Capped at buffered.end so we
-                // never aim past content that actually exists.
                 if (!seekedToLive && appendQueue.length === 0 && video.buffered.length > 0) {{
                     var bufStart = video.buffered.start(0);
                     var bufEnd = video.buffered.end(video.buffered.length - 1);
                     var wallPos = (Date.now() - STREAM_START_MS) / 1000;
-                    // Clamp to available buffer range
                     var seekTarget = Math.min(wallPos, bufEnd - 1.0);
                     seekTarget = Math.max(seekTarget, bufStart);
                     video.currentTime = seekTarget;
-                    // Record wall-clock origin for drift correction
                     liveOriginPosition = video.currentTime;
                     liveOriginTime = Date.now();
                     seekedToLive = true;
                     video.play().catch(function() {{}});
                 }}
-                // Resume playback if stalled or paused.  When the buffer
-                // runs dry the video enters 'waiting' state (not paused),
-                // so checking paused alone misses buffer-starvation recovery.
-                if (video.readyState >= 3 && mode === 'video') {{
+                if (video.readyState >= 3) {{
                     video.play().catch(function() {{}});
                 }}
-                // Trim old buffer data when no appends are pending.
-                // Keeps memory bounded for long viewing sessions.
-                // IMPORTANT: set appending=true before remove() so that
-                // fetch microtasks completing between this handler and
-                // the next updateend don't try to appendBuffer() while
-                // the remove is in progress (causes DOMException).
                 if (appendQueue.length === 0 && video.buffered.length > 0 && video.currentTime > 60) {{
                     var removeEnd = video.currentTime - 30;
                     if (removeEnd > video.buffered.start(0) + 10) {{
                         try {{
                             appending = true;
                             sourceBuffer.remove(video.buffered.start(0), removeEnd);
-                            return; // remove() triggers another updateend
+                            return;
                         }} catch(e) {{
                             appending = false;
                         }}
@@ -593,9 +482,7 @@ h1 {{
     }}
 
     video.addEventListener('waiting', function() {{
-        if (mode === 'video') setStatus('buffering', 'Buffering');
-        // Freeze wall-clock tracker — no content is flowing, so
-        // wall-clock target shouldn't keep advancing.
+        setStatus('buffering', 'Buffering');
         if (liveOriginTime !== null) {{
             var elapsed = (Date.now() - liveOriginTime) / 1000;
             liveOriginPosition += elapsed;
@@ -604,38 +491,26 @@ h1 {{
         }}
     }});
     video.addEventListener('playing', function() {{
-        if (mode === 'video') setStatus('playing', 'Playing');
-        // Resume wall-clock tracker from current playback position.
-        // The gap where the LLM was thinking gets absorbed — we
-        // treat the resume point as the new "live" reference.
+        setStatus('playing', 'Playing');
         if (seekedToLive && liveOriginTime === null) {{
             liveOriginPosition = video.currentTime;
             liveOriginTime = Date.now();
         }}
     }});
 
-    // Playback rate correction — compare current position against
-    // wall-clock target (where the viewer *should* be), not against
-    // the buffer edge (which races ahead due to the render pipeline).
-    // Target = originPosition + realElapsedTime, capped at buffered.end
-    // so we never aim past available content.
     function maintainLiveEdge() {{
-        if (mode === 'video' && mseReady && !video.paused &&
+        if (mseReady && !video.paused &&
             liveOriginTime !== null && video.buffered.length > 0) {{
             var elapsed = (Date.now() - liveOriginTime) / 1000;
             var wallTarget = liveOriginPosition + elapsed;
-            // Don't target past what's actually been rendered
             var bufEnd = video.buffered.end(video.buffered.length - 1);
             var target = Math.min(wallTarget, bufEnd - 1.0);
             var drift = target - video.currentTime;
             if (drift > 5) {{
-                // Very far behind wall-clock — faster correction
                 video.playbackRate = 1.05;
             }} else if (drift > LIVE_DRIFT_THRESHOLD) {{
-                // Moderately behind
                 video.playbackRate = 1.02;
             }} else if (drift < -LIVE_DRIFT_THRESHOLD) {{
-                // Ahead of wall-clock (shouldn't happen often)
                 video.playbackRate = 0.98;
             }} else {{
                 video.playbackRate = 1.0;
@@ -685,15 +560,13 @@ h1 {{
     var COMMENTARY_FADE_SECS = 0.5;
 
     function addCommentary(streamTime, text, style) {{
-        // If stream_time is ahead of current playback (emulator runs ahead
-        // of the renderer), clamp to current time so it shows immediately.
         var now = video.currentTime || 0;
         var effectiveTime = Math.min(streamTime, now);
         commentaryQueue.push({{streamTime: effectiveTime, text: text, style: style || 'normal', shown: false, inSidebar: false}});
     }}
 
     function updateCommentary() {{
-        if (mode !== 'video' || !mseReady) {{
+        if (!mseReady) {{
             requestAnimationFrame(updateCommentary);
             return;
         }}
@@ -728,27 +601,6 @@ h1 {{
     }}
     updateCommentary();
 
-    // -- SSE for frame updates (screenshot history) --
-    function connectFrameSSE() {{
-        var es = new EventSource('/stream');
-        es.addEventListener('init', function(e) {{
-            var d = JSON.parse(e.data);
-            sessionId = d.session || '';
-            history.push(d.frame);
-            frameTxt.textContent = d.frame;
-        }});
-        es.addEventListener('frame', function(e) {{
-            var d = JSON.parse(e.data);
-            history.push(d.frame);
-            if (mode === 'video') frameTxt.textContent = d.frame;
-        }});
-        es.onerror = function() {{
-            es.close();
-            setTimeout(connectFrameSSE, 2000);
-        }};
-    }}
-    connectFrameSSE();
-
     // -- SSE for commentary events --
     function connectCommentarySSE() {{
         var es = new EventSource('/commentary');
@@ -769,8 +621,215 @@ h1 {{
 """
 
 
+def _build_snapshots_html() -> str:
+    """Build the snapshots page — auto-updating screenshots with history browsing."""
+    return """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>melonDS Snapshots</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: #111;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #e0e0e0;
+}
+#container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+#screenshot {
+    image-rendering: pixelated;
+    border: 2px solid #333;
+    border-radius: 4px;
+    width: 512px;
+    height: 768px;
+    background: #000;
+}
+h1 {
+    font-size: 16px;
+    font-weight: normal;
+    color: #666;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+a { color: #4caf50; text-decoration: none; }
+a:hover { text-decoration: underline; }
+#status-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    font-size: 13px;
+    color: #888;
+    justify-content: center;
+}
+#status-bar span {
+    white-space: nowrap;
+}
+.dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.dot.connected { background: #4caf50; }
+.dot.waiting   { background: #666; }
+#mode-badge {
+    padding: 1px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+#mode-badge.live    { background: #2e7d32; color: #c8e6c9; }
+#mode-badge.history { background: #e65100; color: #ffe0b2; }
+#frame-count {
+    display: inline-block;
+    min-width: 4.5em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+#hint {
+    font-size: 11px;
+    color: #555;
+}
+.nav-links {
+    font-size: 12px;
+    color: #555;
+}
+</style>
+</head>
+<body>
+<div id="container">
+    <h1>melonDS Snapshots</h1>
+    <img id="screenshot" alt="DS Screen">
+    <div id="status-bar">
+        <span><span id="dot" class="dot waiting"></span><span id="status">Connecting</span></span>
+        <span id="mode-badge" class="live">LIVE</span>
+        <span>Frame: <span id="frame-count">&mdash;</span></span>
+        <span id="history-pos"></span>
+    </div>
+    <div id="hint">Arrow keys: browse history &middot; Space: return to live</div>
+    <div class="nav-links">
+        <a href="/">Video Stream</a> &middot;
+        <a class="rec-link" href="/recordings">Recordings</a>
+    </div>
+</div>
+<script>document.querySelectorAll('a.rec-link').forEach(function(a){{a.href=location.protocol+'//'+location.hostname+':8091/recordings';}});</script>
+<script>
+(function() {
+    var img        = document.getElementById('screenshot');
+    var dot        = document.getElementById('dot');
+    var statusEl   = document.getElementById('status');
+    var frameTxt   = document.getElementById('frame-count');
+    var modeBadge  = document.getElementById('mode-badge');
+    var historyPos = document.getElementById('history-pos');
+
+    var mode = 'live';  // 'live' or 'history'
+    var history = [];
+    var browseIdx = -1;
+    var sessionId = '';
+
+    function setMode(m) {
+        mode = m;
+        if (m === 'live') {
+            modeBadge.className = 'live';
+            modeBadge.textContent = 'LIVE';
+            historyPos.textContent = '';
+            // Show latest screenshot
+            if (history.length > 0) {
+                showScreenshot(history[history.length - 1]);
+            }
+        } else {
+            modeBadge.className = 'history';
+            modeBadge.textContent = 'HISTORY';
+            historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
+        }
+    }
+
+    function showScreenshot(frame) {
+        img.src = '/screenshot?frame=' + frame + '&s=' + sessionId;
+        frameTxt.textContent = frame;
+    }
+
+    function goLive() {
+        setMode('live');
+        browseIdx = -1;
+    }
+
+    function browseBack() {
+        if (history.length === 0) return;
+        if (mode === 'live') {
+            setMode('history');
+            browseIdx = history.length - 1;
+        } else {
+            browseIdx = Math.max(0, browseIdx - 1);
+        }
+        showScreenshot(history[browseIdx]);
+        historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
+    }
+
+    function browseForward() {
+        if (mode === 'live' || history.length === 0) return;
+        if (browseIdx < history.length - 1) {
+            browseIdx++;
+            showScreenshot(history[browseIdx]);
+            historyPos.textContent = (browseIdx + 1) + ' / ' + history.length;
+        }
+    }
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'ArrowLeft')  { e.preventDefault(); browseBack(); }
+        if (e.key === 'ArrowRight') { e.preventDefault(); browseForward(); }
+        if (e.key === ' ')          { e.preventDefault(); goLive(); }
+    });
+
+    // -- SSE for frame updates --
+    function connectSSE() {
+        var es = new EventSource('/stream');
+        es.addEventListener('init', function(e) {
+            var d = JSON.parse(e.data);
+            sessionId = d.session || '';
+            history.push(d.frame);
+            dot.className = 'dot connected';
+            statusEl.textContent = 'Connected';
+            if (mode === 'live') showScreenshot(d.frame);
+        });
+        es.addEventListener('frame', function(e) {
+            var d = JSON.parse(e.data);
+            history.push(d.frame);
+            if (mode === 'live') {
+                showScreenshot(d.frame);
+            }
+        });
+        es.onerror = function() {
+            dot.className = 'dot waiting';
+            statusEl.textContent = 'Reconnecting';
+            es.close();
+            setTimeout(connectSSE, 2000);
+        };
+    }
+    connectSSE();
+})();
+</script>
+</body>
+</html>
+"""
+
+
 class _ViewerHandler(BaseHTTPRequestHandler):
-    """Serves the unified viewer page, screenshots, and SSE streams."""
+    """Serves video stream, snapshots pages and SSE streams.  Recordings redirect to port 8091."""
 
     def log_message(self, format, *args):
         pass
@@ -779,12 +838,18 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/":
             self._serve_html()
+        elif path == "/snapshots":
+            self._serve_snapshots()
+        elif path == "/recordings" or path.startswith("/recordings/"):
+            self._redirect_to_recording_server()
         elif path == "/screenshot":
             self._serve_screenshot()
         elif path == "/stream":
             self._serve_sse()
         elif path == "/commentary":
             self._serve_commentary_sse()
+        elif path == "/status":
+            self._serve_status()
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -820,11 +885,21 @@ class _ViewerHandler(BaseHTTPRequestHandler):
             style = "normal"
 
         viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
-        frame = data.get("frame") or viewer.get_current_frame()
+        frame = data.get("frame") if data.get("frame") is not None else viewer.get_current_frame()
         viewer.add_commentary(frame, text, style)
         logger.info("Commentary via POST at frame %d: %s", frame, text[:80])
 
         resp = json.dumps({"ok": True, "frame": frame}).encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", len(resp))
+        self.end_headers()
+        self.wfile.write(resp)
+
+    def _serve_status(self):
+        viewer: ViewerServer = self.server.viewer  # type: ignore[attr-defined]
+        frame = viewer.get_current_frame()
+        resp = json.dumps({"frame": frame}).encode()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", len(resp))
@@ -841,6 +916,24 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_snapshots(self):
+        body = _build_snapshots_html().encode()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _redirect_to_recording_server(self):
+        """Redirect recording requests to the standalone recording server on port 8091."""
+        host = self.headers.get("Host", "localhost")
+        hostname = host.split(":")[0]
+        # Preserve the full path (list, playback, or file)
+        target = f"//{hostname}:8091{self.path}"
+        self.send_response(HTTPStatus.TEMPORARY_REDIRECT)
+        self.send_header("Location", target)
+        self.end_headers()
 
     def _serve_screenshot(self):
         from urllib.parse import parse_qs, urlparse
@@ -956,7 +1049,7 @@ def archive_old_screenshots(screenshots_dir: Path) -> Path | None:
 
 
 class ViewerServer:
-    """Unified streaming viewer — HLS video + commentary overlay + screenshots.
+    """Streaming viewer — HLS video + commentary, with separate snapshots page.
 
     Usage::
 
@@ -972,7 +1065,7 @@ class ViewerServer:
     def __init__(self, holder: EmulatorState, port: int = 8090):
         self._holder = holder
         self._port = port
-        self._hls_port = 8091  # default, updated by set_hls_port()
+        self._hls_port = 18091  # default, updated by set_hls_port()
         self._session_id = uuid.uuid4().hex[:12]
         self._stream_start_frame = 0
         self._stream_start_ms: int = 0  # wall-clock start, set in start()
@@ -984,6 +1077,9 @@ class ViewerServer:
         # Commentary SSE clients
         self._commentary_clients: list[queue.Queue[str]] = []
         self._commentary_lock = threading.Lock()
+
+        # Journal reference for forwarding commentary to renderer/recorder
+        self._journal = None
 
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -1031,6 +1127,10 @@ class ViewerServer:
         """Update the HLS port so the page knows where to load video from."""
         self._hls_port = port
 
+    def set_journal(self, journal) -> None:
+        """Set or clear the journal writer for forwarding commentary to the renderer."""
+        self._journal = journal
+
     # -- frame notification ------------------------------------------------
 
     def notify(self):
@@ -1058,12 +1158,12 @@ class ViewerServer:
 
     def add_commentary(self, frame: int, text: str, style: str = "normal") -> None:
         """Push a commentary event to all connected clients."""
-        stream_time = (frame - self._stream_start_frame) / 60.0
+        stream_time = max(0.0, (frame - self._stream_start_frame) / 60.0)
         event_data = json.dumps({
             "frame": frame,
             "text": text,
             "style": style,
-            "stream_time": max(0.0, stream_time),
+            "stream_time": stream_time,
         })
         with self._commentary_lock:
             for q in self._commentary_clients:
@@ -1071,6 +1171,13 @@ class ViewerServer:
                     q.put_nowait(event_data)
                 except queue.Full:
                     pass
+
+        # Forward to journal for recording
+        if self._journal is not None:
+            try:
+                self._journal.write_commentary(stream_time, text, style)
+            except Exception:
+                pass
 
     # -- helpers used by handler -------------------------------------------
 

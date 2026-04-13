@@ -239,8 +239,8 @@ def _tool_init_emulator(holder: EmulatorState) -> dict[str, Any]:
     return result
 
 
-def _tool_load_rom(holder: EmulatorState, rom_path: str) -> dict[str, Any]:
-    logger.info("Tool: load_rom path=%s", rom_path)
+def _tool_load_rom(holder: EmulatorState, rom_path: str, name: str = "unnamed") -> dict[str, Any]:
+    logger.info("Tool: load_rom path=%s name=%s", rom_path, name)
 
     # If the renderer is running, journal the ROM load so it reloads too
     _journal_write(holder, "write_load_rom", rom_path=str(Path(rom_path).resolve()))
@@ -248,20 +248,12 @@ def _tool_load_rom(holder: EmulatorState, rom_path: str) -> dict[str, Any]:
     msg = holder.load_rom(rom_path)
     result: dict[str, Any] = {"success": True, "rom_path": holder.rom_path, "message": msg}
 
-    # Auto-start viewer or streamer based on settings
-    from .settings import get_auto_start
+    # Auto-start viewer + stream + recording if enabled
+    from .settings import get_stream
 
-    auto = get_auto_start()
-    if auto == "viewer":
-        auto_result = _tool_start_viewer(holder)
-        result["auto_started"] = "viewer"
-        result["viewer_url"] = auto_result.get("url")
-    elif auto == "stream":
-        # Start both the viewer (unified page on 8090) and the HLS
-        # stream (segments on 8091) — the viewer page loads video from
-        # the stream server cross-origin.
+    if get_stream():
         viewer_result = _tool_start_viewer(holder)
-        stream_result = _tool_start_video_stream(holder)
+        stream_result = _tool_start_video_stream(holder, name=name)
         result["auto_started"] = "stream"
         result["viewer_url"] = viewer_result.get("url")
         result["stream_url"] = stream_result.get("url")
@@ -296,13 +288,13 @@ def _tool_start_viewer(holder: EmulatorState, port: int = 8090) -> dict[str, Any
     return result
 
 
-def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[str, Any]:
+def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str = "unnamed") -> dict[str, Any]:
     import subprocess
     import sys
 
     from .journal import JournalWriter
 
-    logger.info("Tool: start_video_stream port=%d", port)
+    logger.info("Tool: start_video_stream port=%d name=%s", port, name)
 
     # Check if renderer is already running
     proc = getattr(holder, "_renderer_proc", None)
@@ -343,6 +335,12 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     if initial_state:
         cmd += ["--initial-state", initial_state]
 
+    from .settings import get_stream
+    if get_stream():
+        recordings_dir = holder.data_dir / "recordings"
+        recordings_dir.mkdir(exist_ok=True)
+        cmd += ["--record-dir", str(recordings_dir), "--record-name", name]
+
     renderer_proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -356,6 +354,7 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     if viewer is not None:
         viewer.set_hls_port(port)
         viewer._stream_start_frame = holder.frame_count
+        viewer.set_journal(journal)
 
     return {
         "success": True,
@@ -371,6 +370,11 @@ def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
 
     if journal is None and proc is None:
         return {"success": True, "message": "No video stream running."}
+
+    # Disconnect journal from viewer before shutdown
+    viewer = getattr(holder, "_viewer", None)
+    if viewer is not None:
+        viewer.set_journal(None)
 
     # Send shutdown via journal, then stop the writer (which closes the
     # socket — the renderer will see either the shutdown entry or a socket
@@ -1455,9 +1459,15 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_init_emulator(holder)
 
     @mcp.tool()
-    def load_rom(rom_path: str) -> dict[str, Any]:
-        """Load a Nintendo DS ROM (.nds) file. Requires init_emulator first."""
-        return _tool_load_rom(holder, rom_path)
+    def load_rom(rom_path: str, name: str = "unnamed") -> dict[str, Any]:
+        """Load a Nintendo DS ROM (.nds) file. Requires init_emulator first.
+
+        Args:
+            rom_path: Path to the .nds ROM file.
+            name: Name for the recording session (shown on the recordings page).
+                  Only used when auto-start is set to "stream". Defaults to "unnamed".
+        """
+        return _tool_load_rom(holder, rom_path, name)
 
     @mcp.tool()
     def start_viewer(port: int = 8090) -> dict[str, Any]:
@@ -1473,7 +1483,7 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_start_viewer(holder, port)
 
     @mcp.tool()
-    def start_video_stream(port: int = 8091) -> dict[str, Any]:
+    def start_video_stream(name: str, port: int = 18091) -> dict[str, Any]:
         """Start an HLS video stream of the DS gameplay with audio.
 
         Launches a separate rendering emulator process that replays inputs
@@ -1489,9 +1499,10 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         is designed for debugging with frame-by-frame history browsing.
 
         Args:
-            port: HTTP port to listen on (default 8091).
+            name: Name for this recording session (shown on the recordings page).
+            port: HTTP port to listen on (default 18091).
         """
-        return _tool_start_video_stream(holder, port)
+        return _tool_start_video_stream(holder, port, name)
 
     @mcp.tool()
     def stop_video_stream() -> dict[str, Any]:

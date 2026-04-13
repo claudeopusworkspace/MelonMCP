@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -40,8 +41,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--journal-sock", required=True, help="Path to journal Unix socket")
     parser.add_argument("--rom", required=True, help="Path to NDS ROM file")
     parser.add_argument("--initial-state", default=None, help="Path to initial savestate")
-    parser.add_argument("--port", type=int, default=8091, help="HLS stream HTTP port")
+    parser.add_argument("--port", type=int, default=18091, help="HLS stream HTTP port")
     parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
+    parser.add_argument("--record-dir", default=None, help="Directory for recording output (enables recording)")
+    parser.add_argument("--record-name", default="unnamed", help="Name for the recording session")
     return parser.parse_args()
 
 
@@ -86,6 +89,15 @@ def main() -> None:
     streamer.start()
     logger.info("HLS streamer started on port %d (blocking mode)", args.port)
 
+    # Start session recorder if enabled
+    recorder = None
+    if args.record_dir:
+        from .recorder import SessionRecorder
+        recorder = SessionRecorder(Path(args.record_dir), name=args.record_name)
+        recorder.start()
+        streamer.set_recorder(recorder)
+        logger.info("Session recorder started, output dir: %s, name: %s", args.record_dir, args.record_name)
+
     # Connect to journal
     reader = JournalReader(args.journal_sock)
     retry_count = 0
@@ -103,6 +115,13 @@ def main() -> None:
             time.sleep(0.5)
 
     logger.info("Connected to journal, entering replay loop")
+
+    # Handle SIGTERM so the recorder can finalize on kill
+    def _sigterm_handler(signum, frame):
+        logger.info("Renderer received SIGTERM")
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
     # Write initial frame position
     _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)
@@ -140,14 +159,24 @@ def main() -> None:
                 holder._notify_frame_change()
                 logger.info("Renderer reset")
 
+            elif entry_type == "commentary":
+                if recorder is not None:
+                    recorder.add_commentary(
+                        entry["stream_time"],
+                        entry["text"],
+                        entry.get("style", "normal"),
+                    )
+
             elif entry_type == "load_rom":
                 rom_path = entry["rom_path"]
                 logger.info("Renderer loading new ROM: %s", rom_path)
                 streamer.stop()
                 holder.load_rom(rom_path)
                 streamer = HLSStreamer(holder, port=args.port, blocking=True)
+                if recorder is not None:
+                    streamer.set_recorder(recorder)
                 streamer.start()
-                logger.info("Renderer restarted streamer for new ROM")
+                logger.info("Renderer restarted streamer for new ROM (recorder continues)")
 
             elif entry_type == "sync":
                 state_path = entry["state_path"]
@@ -173,6 +202,9 @@ def main() -> None:
     except Exception:
         logger.error("Renderer replay loop error", exc_info=True)
     finally:
+        # Stop recorder before streamer so it can flush remaining frames
+        if recorder is not None:
+            recorder.stop()
         # Clean up frame position file
         frame_file = data_dir / _FRAME_FILE
         frame_file.unlink(missing_ok=True)
