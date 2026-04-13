@@ -1,6 +1,6 @@
 """Standalone recording browser — always-on HTTP server for listing and playing back recorded sessions.
 
-Runs independently of the emulator on port 8092.  Serves:
+Runs independently of the emulator on port 8091.  Serves:
 - /              — redirect to /recordings
 - /recordings    — session list
 - /recordings/<stem>         — playback page
@@ -23,7 +23,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = 8092
+DEFAULT_PORT = 8091
 DEFAULT_RECORDINGS_DIR = Path(__file__).resolve().parent.parent / "recordings"
 
 

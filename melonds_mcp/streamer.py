@@ -98,13 +98,13 @@ class HLSStreamer:
 
     Usage::
 
-        streamer = HLSStreamer(holder, port=8091)
+        streamer = HLSStreamer(holder, port=18091)
         streamer.start()           # launches ffmpeg + HTTP server
         # ... emulation happens, on_cycle callback feeds frames to ffmpeg ...
         streamer.stop()
     """
 
-    def __init__(self, holder: EmulatorState, port: int = 8091, *, blocking: bool = False):
+    def __init__(self, holder: EmulatorState, port: int = 18091, *, blocking: bool = False):
         self._holder = holder
         self._port = port
         self._blocking = blocking

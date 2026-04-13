@@ -3,7 +3,7 @@
 Pages:
 - /           — HLS video playback with commentary overlay
 - /snapshots  — Auto-updating screenshots with history browsing (debug)
-- /recordings — Redirects to standalone recording server (port 8092)
+- /recordings — Redirects to standalone recording server (port 8091)
 
 SSE endpoints:
 - /stream  — frame update notifications (used by /snapshots page)
@@ -254,7 +254,7 @@ a:hover {{ text-decoration: underline; }}
         <a class="rec-link" href="/recordings">Recordings</a>
     </div>
 </div>
-<script>document.querySelectorAll('a.rec-link').forEach(function(a){{a.href=location.protocol+'//'+location.hostname+':8092/recordings';}});</script>
+<script>document.querySelectorAll('a.rec-link').forEach(function(a){{a.href=location.protocol+'//'+location.hostname+':8091/recordings';}});</script>
 <button id="sidebar-toggle">COMMENTARY</button>
 <div id="commentary-sidebar">
     <h2>Commentary</h2>
@@ -726,7 +726,7 @@ a:hover { text-decoration: underline; }
         <a class="rec-link" href="/recordings">Recordings</a>
     </div>
 </div>
-<script>document.querySelectorAll('a.rec-link').forEach(function(a){{a.href=location.protocol+'//'+location.hostname+':8092/recordings';}});</script>
+<script>document.querySelectorAll('a.rec-link').forEach(function(a){{a.href=location.protocol+'//'+location.hostname+':8091/recordings';}});</script>
 <script>
 (function() {
     var img        = document.getElementById('screenshot');
@@ -829,7 +829,7 @@ a:hover { text-decoration: underline; }
 
 
 class _ViewerHandler(BaseHTTPRequestHandler):
-    """Serves video stream, snapshots pages and SSE streams.  Recordings redirect to port 8092."""
+    """Serves video stream, snapshots pages and SSE streams.  Recordings redirect to port 8091."""
 
     def log_message(self, format, *args):
         pass
@@ -926,11 +926,11 @@ class _ViewerHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _redirect_to_recording_server(self):
-        """Redirect recording requests to the standalone recording server on port 8092."""
+        """Redirect recording requests to the standalone recording server on port 8091."""
         host = self.headers.get("Host", "localhost")
         hostname = host.split(":")[0]
         # Preserve the full path (list, playback, or file)
-        target = f"//{hostname}:8092{self.path}"
+        target = f"//{hostname}:8091{self.path}"
         self.send_response(HTTPStatus.TEMPORARY_REDIRECT)
         self.send_header("Location", target)
         self.end_headers()
@@ -1065,7 +1065,7 @@ class ViewerServer:
     def __init__(self, holder: EmulatorState, port: int = 8090):
         self._holder = holder
         self._port = port
-        self._hls_port = 8091  # default, updated by set_hls_port()
+        self._hls_port = 18091  # default, updated by set_hls_port()
         self._session_id = uuid.uuid4().hex[:12]
         self._stream_start_frame = 0
         self._stream_start_ms: int = 0  # wall-clock start, set in start()

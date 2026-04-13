@@ -7,7 +7,7 @@
 #   recording_server.sh status  — check if running
 #   recording_server.sh restart — stop + start
 #
-# The server runs on port 8092 and serves recorded sessions from
+# The server runs on port 8091 and serves recorded sessions from
 # /workspace/MelonMCP/recordings/.
 
 set -euo pipefail
@@ -16,7 +16,7 @@ PROJECT_DIR="/workspace/MelonMCP"
 VENV="$PROJECT_DIR/.venv"
 PIDFILE="$PROJECT_DIR/.recording_server.pid"
 LOGFILE="$PROJECT_DIR/.recording_server.log"
-PORT=8092
+PORT=8091
 RECORDINGS_DIR="$PROJECT_DIR/recordings"
 
 _is_running() {

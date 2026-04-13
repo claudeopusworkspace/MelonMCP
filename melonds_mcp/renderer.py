@@ -41,7 +41,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--journal-sock", required=True, help="Path to journal Unix socket")
     parser.add_argument("--rom", required=True, help="Path to NDS ROM file")
     parser.add_argument("--initial-state", default=None, help="Path to initial savestate")
-    parser.add_argument("--port", type=int, default=8091, help="HLS stream HTTP port")
+    parser.add_argument("--port", type=int, default=18091, help="HLS stream HTTP port")
     parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
     parser.add_argument("--record-dir", default=None, help="Directory for recording output (enables recording)")
     parser.add_argument("--record-name", default="unnamed", help="Name for the recording session")

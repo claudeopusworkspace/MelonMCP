@@ -288,7 +288,7 @@ def _tool_start_viewer(holder: EmulatorState, port: int = 8090) -> dict[str, Any
     return result
 
 
-def _tool_start_video_stream(holder: EmulatorState, port: int = 8091, name: str = "unnamed") -> dict[str, Any]:
+def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str = "unnamed") -> dict[str, Any]:
     import subprocess
     import sys
 
@@ -1483,7 +1483,7 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_start_viewer(holder, port)
 
     @mcp.tool()
-    def start_video_stream(name: str, port: int = 8091) -> dict[str, Any]:
+    def start_video_stream(name: str, port: int = 18091) -> dict[str, Any]:
         """Start an HLS video stream of the DS gameplay with audio.
 
         Launches a separate rendering emulator process that replays inputs
@@ -1500,7 +1500,7 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
 
         Args:
             name: Name for this recording session (shown on the recordings page).
-            port: HTTP port to listen on (default 8091).
+            port: HTTP port to listen on (default 18091).
         """
         return _tool_start_video_stream(holder, port, name)
 
