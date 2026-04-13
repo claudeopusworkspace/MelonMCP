@@ -24,8 +24,10 @@ macros/
 watches/
 recordings/
 
-# Logs
+# Logs + PID files
 *.log
+*.pid
+.recording_server.pid
 
 # Settings (user-local)
 settings.json
