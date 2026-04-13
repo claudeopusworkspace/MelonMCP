@@ -47,10 +47,11 @@ class SessionRecorder:
         recorder.stop()  # finalizes MP4 + writes companion JSON
     """
 
-    def __init__(self, recordings_dir: Path):
+    def __init__(self, recordings_dir: Path, name: str = "unnamed"):
         self._recordings_dir = recordings_dir
         self._recordings_dir.mkdir(parents=True, exist_ok=True)
 
+        self._name = name
         self._timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self._mp4_path = self._recordings_dir / f"{self._timestamp}.mp4"
         self._json_path = self._recordings_dir / f"{self._timestamp}.json"
@@ -83,6 +84,7 @@ class SessionRecorder:
         with self._commentary_lock:
             commentary = list(self._commentary)
         meta = {
+            "name": self._name,
             "started": self._started_at,
             "duration": round(duration, 2),
             "frames": self._frames_written,

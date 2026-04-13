@@ -785,19 +785,16 @@ def _build_recordings_html(recordings: list[dict]) -> str:
         dur_min = int(dur) // 60
         dur_sec = int(dur) % 60
         dur_str = f"{dur_min}:{dur_sec:02d}"
-        desc = rec.get("description", "")
-        if len(desc) > 80:
-            desc = desc[:77] + "..."
-        if not desc:
-            desc = '<span style="color:#555">No commentary</span>'
-        else:
-            desc = desc.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        rec_name = rec.get("name", "unnamed")
+        if len(rec_name) > 80:
+            rec_name = rec_name[:77] + "..."
+        rec_name = rec_name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         size_mb = rec.get("size_mb", 0)
         rows += f"""\
         <tr class="rec-row" onclick="location.href='/recordings/{stem}'">
+            <td>{rec_name}</td>
             <td>{date_str}</td>
             <td>{dur_str}</td>
-            <td>{desc}</td>
             <td>{size_mb:.1f} MB</td>
         </tr>
 """
@@ -859,9 +856,9 @@ td {{
 <table>
     <thead>
         <tr>
+            <th>Name</th>
             <th>Date</th>
             <th>Duration</th>
-            <th>Description</th>
             <th>Size</th>
         </tr>
     </thead>
@@ -885,6 +882,7 @@ def _build_playback_html(stem: str, commentary: list[dict], meta: dict) -> str:
     except (ValueError, TypeError):
         date_str = stem
 
+    rec_name = meta.get("name", "unnamed")
     duration = meta.get("duration", 0)
     dur_min = int(duration) // 60
     dur_sec = int(duration) % 60
@@ -895,7 +893,7 @@ def _build_playback_html(stem: str, commentary: list[dict], meta: dict) -> str:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Recording — {date_str}</title>
+<title>Recording — {rec_name}</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{
@@ -1053,7 +1051,7 @@ a:hover {{ text-decoration: underline; }}
         <a href="/recordings">&larr; All Recordings</a>
         <a href="/">Live Stream</a>
     </div>
-    <h1>Recording Playback</h1>
+    <h1>{rec_name}</h1>
     <div class="meta">
         <span>{date_str}</span>
         <span>{dur_min}:{dur_sec:02d}</span>
@@ -1286,8 +1284,7 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                         meta = json.loads(json_path.read_text())
                         info["duration"] = meta.get("duration", 0)
                         info["started"] = meta.get("started", "")
-                        comments = meta.get("commentary", [])
-                        info["description"] = comments[0]["text"] if comments else ""
+                        info["name"] = meta.get("name", "unnamed")
                     except Exception:
                         pass
                 recordings.append(info)

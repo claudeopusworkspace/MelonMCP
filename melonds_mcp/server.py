@@ -239,8 +239,8 @@ def _tool_init_emulator(holder: EmulatorState) -> dict[str, Any]:
     return result
 
 
-def _tool_load_rom(holder: EmulatorState, rom_path: str) -> dict[str, Any]:
-    logger.info("Tool: load_rom path=%s", rom_path)
+def _tool_load_rom(holder: EmulatorState, rom_path: str, name: str = "unnamed") -> dict[str, Any]:
+    logger.info("Tool: load_rom path=%s name=%s", rom_path, name)
 
     # If the renderer is running, journal the ROM load so it reloads too
     _journal_write(holder, "write_load_rom", rom_path=str(Path(rom_path).resolve()))
@@ -261,7 +261,7 @@ def _tool_load_rom(holder: EmulatorState, rom_path: str) -> dict[str, Any]:
         # stream (segments on 8091) — the viewer page loads video from
         # the stream server cross-origin.
         viewer_result = _tool_start_viewer(holder)
-        stream_result = _tool_start_video_stream(holder)
+        stream_result = _tool_start_video_stream(holder, name=name)
         result["auto_started"] = "stream"
         result["viewer_url"] = viewer_result.get("url")
         result["stream_url"] = stream_result.get("url")
@@ -296,13 +296,13 @@ def _tool_start_viewer(holder: EmulatorState, port: int = 8090) -> dict[str, Any
     return result
 
 
-def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[str, Any]:
+def _tool_start_video_stream(holder: EmulatorState, port: int = 8091, name: str = "unnamed") -> dict[str, Any]:
     import subprocess
     import sys
 
     from .journal import JournalWriter
 
-    logger.info("Tool: start_video_stream port=%d", port)
+    logger.info("Tool: start_video_stream port=%d name=%s", port, name)
 
     # Check if renderer is already running
     proc = getattr(holder, "_renderer_proc", None)
@@ -347,7 +347,7 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 8091) -> dict[st
     if get_record():
         recordings_dir = holder.data_dir / "recordings"
         recordings_dir.mkdir(exist_ok=True)
-        cmd += ["--record-dir", str(recordings_dir)]
+        cmd += ["--record-dir", str(recordings_dir), "--record-name", name]
 
     renderer_proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1467,9 +1467,15 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_init_emulator(holder)
 
     @mcp.tool()
-    def load_rom(rom_path: str) -> dict[str, Any]:
-        """Load a Nintendo DS ROM (.nds) file. Requires init_emulator first."""
-        return _tool_load_rom(holder, rom_path)
+    def load_rom(rom_path: str, name: str = "unnamed") -> dict[str, Any]:
+        """Load a Nintendo DS ROM (.nds) file. Requires init_emulator first.
+
+        Args:
+            rom_path: Path to the .nds ROM file.
+            name: Name for the recording session (shown on the recordings page).
+                  Only used when auto-start is set to "stream". Defaults to "unnamed".
+        """
+        return _tool_load_rom(holder, rom_path, name)
 
     @mcp.tool()
     def start_viewer(port: int = 8090) -> dict[str, Any]:
@@ -1485,7 +1491,7 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_start_viewer(holder, port)
 
     @mcp.tool()
-    def start_video_stream(port: int = 8091) -> dict[str, Any]:
+    def start_video_stream(name: str, port: int = 8091) -> dict[str, Any]:
         """Start an HLS video stream of the DS gameplay with audio.
 
         Launches a separate rendering emulator process that replays inputs
@@ -1501,9 +1507,10 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         is designed for debugging with frame-by-frame history browsing.
 
         Args:
+            name: Name for this recording session (shown on the recordings page).
             port: HTTP port to listen on (default 8091).
         """
-        return _tool_start_video_stream(holder, port)
+        return _tool_start_video_stream(holder, port, name)
 
     @mcp.tool()
     def stop_video_stream() -> dict[str, Any]:

@@ -44,6 +44,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8091, help="HLS stream HTTP port")
     parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
     parser.add_argument("--record-dir", default=None, help="Directory for recording output (enables recording)")
+    parser.add_argument("--record-name", default="unnamed", help="Name for the recording session")
     return parser.parse_args()
 
 
@@ -92,10 +93,10 @@ def main() -> None:
     recorder = None
     if args.record_dir:
         from .recorder import SessionRecorder
-        recorder = SessionRecorder(Path(args.record_dir))
+        recorder = SessionRecorder(Path(args.record_dir), name=args.record_name)
         recorder.start()
         streamer.set_recorder(recorder)
-        logger.info("Session recorder started, output dir: %s", args.record_dir)
+        logger.info("Session recorder started, output dir: %s, name: %s", args.record_dir, args.record_name)
 
     # Connect to journal
     reader = JournalReader(args.journal_sock)
@@ -169,18 +170,13 @@ def main() -> None:
             elif entry_type == "load_rom":
                 rom_path = entry["rom_path"]
                 logger.info("Renderer loading new ROM: %s", rom_path)
-                if recorder is not None:
-                    recorder.stop()
                 streamer.stop()
                 holder.load_rom(rom_path)
                 streamer = HLSStreamer(holder, port=args.port, blocking=True)
-                if args.record_dir:
-                    from .recorder import SessionRecorder
-                    recorder = SessionRecorder(Path(args.record_dir))
-                    recorder.start()
+                if recorder is not None:
                     streamer.set_recorder(recorder)
                 streamer.start()
-                logger.info("Renderer restarted streamer for new ROM")
+                logger.info("Renderer restarted streamer for new ROM (recorder continues)")
 
             elif entry_type == "sync":
                 state_path = entry["state_path"]
