@@ -1510,6 +1510,31 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_stop_video_stream(holder)
 
     @mcp.tool()
+    def set_stream_config(enabled: bool | None = None) -> dict[str, Any]:
+        """Override the stream setting for the life of this server process.
+
+        The override sits above env vars and settings.json in the resolution
+        chain, so a single MCP session can flip streaming on/off without
+        touching disk.
+
+        Args:
+            enabled: True to force streaming on, False to force it off,
+                None to clear the override (fall back to env + settings.json).
+
+        Notes:
+            - Affects future load_rom calls (auto-viewer/stream/recording).
+            - Does NOT stop a currently running stream — call stop_video_stream()
+              for that.
+
+        Returns:
+            {"override": <bool|None>, "effective": <bool>} — the override value
+            now in force and the effective stream state after resolution.
+        """
+        from .settings import get_stream, set_stream_override
+        set_stream_override(enabled)
+        return {"override": enabled, "effective": get_stream()}
+
+    @mcp.tool()
     def advance_frames(
         count: int = 1,
         buttons: list[str] = [],

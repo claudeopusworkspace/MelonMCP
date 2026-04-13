@@ -24,6 +24,17 @@ def stub_settings(monkeypatch):
     return _stub
 
 
+@pytest.fixture(autouse=True)
+def clear_stream_override():
+    """Reset the process-local override before and after each test.
+
+    The override is module-global, so leaks between tests would be confusing.
+    """
+    settings_mod.set_stream_override(None)
+    yield
+    settings_mod.set_stream_override(None)
+
+
 def test_get_stream_reads_json_when_env_unset(clean_env, stub_settings):
     stub_settings({"stream": True})
     assert settings_mod.get_stream() is True
@@ -100,3 +111,48 @@ def test_melonds_no_stream_invalid_raises(monkeypatch, clean_env, stub_settings)
     monkeypatch.setenv("MELONDS_NO_STREAM", "sometimes")
     with pytest.raises(ValueError, match="MELONDS_NO_STREAM"):
         settings_mod.get_stream()
+
+
+# ── Process-local override (set via the set_stream_config MCP tool) ──────────
+
+
+def test_stream_override_false_beats_env_and_settings(
+    monkeypatch, clean_env, stub_settings
+):
+    """Override sits at tier 0 — wins over MELONDS_STREAM and settings.json."""
+    stub_settings({"stream": True})
+    monkeypatch.setenv("MELONDS_STREAM", "1")
+    settings_mod.set_stream_override(False)
+    assert settings_mod.get_stream() is False
+
+
+def test_stream_override_true_beats_no_stream_env(
+    monkeypatch, clean_env, stub_settings
+):
+    """Override beats even MELONDS_NO_STREAM, which otherwise wins everything."""
+    stub_settings({"stream": False})
+    monkeypatch.setenv("MELONDS_NO_STREAM", "1")
+    settings_mod.set_stream_override(True)
+    assert settings_mod.get_stream() is True
+
+
+def test_stream_override_none_falls_through(
+    monkeypatch, clean_env, stub_settings
+):
+    """Clearing the override restores the env + settings.json chain."""
+    stub_settings({"stream": True})
+    settings_mod.set_stream_override(False)
+    assert settings_mod.get_stream() is False
+    settings_mod.set_stream_override(None)
+    assert settings_mod.get_stream() is True
+
+
+def test_get_stream_override_reports_current_value(clean_env, stub_settings):
+    stub_settings({})
+    assert settings_mod.get_stream_override() is None
+    settings_mod.set_stream_override(True)
+    assert settings_mod.get_stream_override() is True
+    settings_mod.set_stream_override(False)
+    assert settings_mod.get_stream_override() is False
+    settings_mod.set_stream_override(None)
+    assert settings_mod.get_stream_override() is None

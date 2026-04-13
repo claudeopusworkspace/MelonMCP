@@ -63,14 +63,39 @@ def _parse_bool_env(name: str) -> bool | None:
     )
 
 
+# Process-local override set via the `set_stream_config` MCP tool. Lives above
+# env vars and settings.json in get_stream()'s resolution chain so a single
+# Claude session can flip streaming on/off without touching disk or env.
+_stream_override: bool | None = None
+
+
+def set_stream_override(enabled: bool | None) -> None:
+    """Set or clear the process-local stream override.
+
+    enabled=True/False sets the override; enabled=None clears it so get_stream()
+    falls back to the env-var + settings.json chain.
+    """
+    global _stream_override
+    _stream_override = enabled
+
+
+def get_stream_override() -> bool | None:
+    """Return the current process-local override, or None if unset."""
+    return _stream_override
+
+
 def get_stream() -> bool:
     """Return the stream setting: whether to auto-start viewer, HLS stream, and recording on ROM load.
 
     Resolution order (first match wins):
+        0. Process-local override set via set_stream_override()
         1. MELONDS_NO_STREAM env var (if truthy, forces stream off)
         2. MELONDS_STREAM env var (explicit on/off)
         3. settings.json / settings.default.json "stream" key
     """
+    if _stream_override is not None:
+        return _stream_override
+
     no_stream = _parse_bool_env("MELONDS_NO_STREAM")
     if no_stream is True:
         return False
