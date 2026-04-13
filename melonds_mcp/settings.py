@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,9 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_PATH = _PROJECT_ROOT / "settings.default.json"
 _USER_PATH = _PROJECT_ROOT / "settings.json"
+
+_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -36,7 +40,44 @@ def load_settings() -> dict[str, Any]:
     return settings
 
 
+def _parse_bool_env(name: str) -> bool | None:
+    """Parse an env var as a boolean. Returns None if unset/empty.
+
+    Accepts (case-insensitive): 1/0, true/false, yes/no, on/off.
+    Raises ValueError on any other non-empty value so typos don't silently
+    become "falsy".
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    value = raw.strip().lower()
+    if not value:
+        return None
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    raise ValueError(
+        f"Invalid boolean value for {name}={raw!r}; "
+        f"expected one of {sorted(_TRUTHY | _FALSY)}"
+    )
+
+
 def get_stream() -> bool:
-    """Return the stream setting: whether to auto-start viewer, HLS stream, and recording on ROM load."""
+    """Return the stream setting: whether to auto-start viewer, HLS stream, and recording on ROM load.
+
+    Resolution order (first match wins):
+        1. MELONDS_NO_STREAM env var (if truthy, forces stream off)
+        2. MELONDS_STREAM env var (explicit on/off)
+        3. settings.json / settings.default.json "stream" key
+    """
+    no_stream = _parse_bool_env("MELONDS_NO_STREAM")
+    if no_stream is True:
+        return False
+
+    stream_env = _parse_bool_env("MELONDS_STREAM")
+    if stream_env is not None:
+        return stream_env
+
     settings = load_settings()
     return bool(settings.get("stream", False))
