@@ -35,7 +35,9 @@ RecordingServer (recording_server.py, port 8091): /recordings = list + playback 
 
 **Streaming architecture:** The main emulator processes MCP commands at full speed and journals actions to a renderer subprocess via Unix socket. The renderer replays frames one-at-a-time (no render skipping) and pipes them through ffmpeg to produce HLS segments (port 18091). The unified viewer page (port 8090) loads HLS video cross-origin and receives commentary events via SSE. Frame-advancing tools block until the renderer catches up to within 30 seconds. If the renderer falls 60+ seconds behind, a savestate resync is triggered automatically.
 
-**Recording browser:** A standalone HTTP server on port 8091 serves the recording list and playback pages (`/recordings`, `/recordings/<stem>`, MP4/JSON files). It reads recordings off disk and runs independently of the emulator — auto-started by `~/.profile` so recordings are always browsable. The viewer (8090) redirects `/recordings*` to this server.
+**Recording browser:** A standalone HTTP server on port 8091 serves the recording list and playback pages. It reads recordings off disk and runs independently of the emulator — auto-started by `~/.profile` so recordings are always browsable. The viewer (8090) redirects `/recordings*` to this server.
+
+Sources are configured via `recording_sources.json` at project root (gitignored — it's local/machine-specific). Each entry has `slug` (URL segment), `label` (section header), and `path` (absolute directory). URLs are `/recordings/<slug>/<stem>[.mp4|.json]`, and the list page groups entries by source. If the config file is absent, the server falls back to single-source mode at `$PROJECT_DIR/recordings` with unprefixed URLs (`/recordings/<stem>`).
 
 The C shim (`shim/melonds_shim.cpp`) wraps the melonDS `NDS` C++ class as a flat C API. Platform callbacks (`shim/platform_stubs.cpp`) provide file I/O, threading, and save data persistence.
 
