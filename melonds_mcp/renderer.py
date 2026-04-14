@@ -1,12 +1,19 @@
-"""Rendering emulator process — replays journal entries at real-time for HLS streaming.
+"""Rendering emulator process — replays journal entries for HLS streaming and recording.
 
-Launched as a subprocess by the main MCP server:
-    python -m melonds_mcp.renderer --journal-sock <path> --rom <path> \
-        [--initial-state <path>] --port <port> --data-dir <path>
+Launched as a subprocess by the main MCP server (with its own session so it
+survives server exit):
+
+    python -m melonds_mcp.renderer --journal-file <path> --rom <path> \
+        [--initial-state <path>] --port <port> --data-dir <path> \
+        [--server-pid <pid>] [--record-dir <dir>] [--record-name <name>] \
+        [--log-file <path>]
 
 Initializes its own melonDS instance, attaches the HLS streamer, and
-replays input journal entries from the main emulator. The streamer's
+replays input journal entries from the main emulator.  The streamer's
 existing real-time throttle handles pacing.
+
+In async mode the renderer continues processing journal entries after the
+MCP server has exited, then cleans up and finalises the recording.
 """
 
 from __future__ import annotations
@@ -27,24 +34,36 @@ _FRAME_FILE = ".renderer_frame"
 _FRAME_FILE_TMP = ".renderer_frame.tmp"
 
 
-def _setup_logging() -> None:
-    """Configure logging for the renderer process."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [renderer] %(levelname)s %(name)s: %(message)s",
+def _setup_logging(log_file: str | None = None) -> None:
+    """Configure logging for the renderer process.
+
+    If *log_file* is given, logs to that file instead of stderr.
+    """
+    handler: logging.Handler
+    if log_file:
+        handler = logging.FileHandler(log_file, mode="w")
+    else:
+        handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [renderer] %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-    )
+    ))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="melonDS rendering emulator")
-    parser.add_argument("--journal-sock", required=True, help="Path to journal Unix socket")
+    parser.add_argument("--journal-file", required=True, help="Path to journal JSONL file")
     parser.add_argument("--rom", required=True, help="Path to NDS ROM file")
     parser.add_argument("--initial-state", default=None, help="Path to initial savestate")
     parser.add_argument("--port", type=int, default=18091, help="HLS stream HTTP port")
     parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
+    parser.add_argument("--server-pid", type=int, default=None, help="PID of the MCP server (for liveness detection)")
     parser.add_argument("--record-dir", default=None, help="Directory for recording output (enables recording)")
     parser.add_argument("--record-name", default="unnamed", help="Name for the recording session")
+    parser.add_argument("--log-file", default=None, help="Path to renderer log file (default: stderr)")
     return parser.parse_args()
 
 
@@ -58,13 +77,13 @@ def _write_frame_position(data_dir: Path, emulator_frame: int, stream_frame: int
 
 
 def main() -> None:
-    _setup_logging()
     args = _parse_args()
+    _setup_logging(args.log_file)
     data_dir = Path(args.data_dir)
 
     logger.info(
-        "Renderer starting: rom=%s port=%d data_dir=%s initial_state=%s",
-        args.rom, args.port, args.data_dir, args.initial_state,
+        "Renderer starting: rom=%s port=%d data_dir=%s initial_state=%s server_pid=%s",
+        args.rom, args.port, args.data_dir, args.initial_state, args.server_pid,
     )
 
     from .emulator import EmulatorState
@@ -98,23 +117,10 @@ def main() -> None:
         streamer.set_recorder(recorder)
         logger.info("Session recorder started, output dir: %s, name: %s", args.record_dir, args.record_name)
 
-    # Connect to journal
-    reader = JournalReader(args.journal_sock)
-    retry_count = 0
-    max_retries = 10
-    while retry_count < max_retries:
-        try:
-            reader.connect()
-            break
-        except (ConnectionRefusedError, FileNotFoundError):
-            retry_count += 1
-            if retry_count >= max_retries:
-                logger.error("Failed to connect to journal socket after %d retries", max_retries)
-                streamer.stop()
-                sys.exit(1)
-            time.sleep(0.5)
-
-    logger.info("Connected to journal, entering replay loop")
+    # Connect to journal file (tail-follow)
+    reader = JournalReader(args.journal_file, server_pid=args.server_pid)
+    reader.connect()
+    logger.info("Journal reader connected, entering replay loop")
 
     # Handle SIGTERM so the recorder can finalize on kill
     def _sigterm_handler(signum, frame):
@@ -188,7 +194,7 @@ def main() -> None:
                 holder._notify_frame_change()
 
             elif entry_type == "shutdown":
-                logger.info("Renderer received shutdown")
+                logger.info("Renderer received shutdown entry")
                 break
 
             else:
@@ -198,7 +204,7 @@ def main() -> None:
             _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)
 
     except StopIteration:
-        logger.info("Journal socket closed — main emulator disconnected")
+        logger.info("Journal ended (server exited or no more entries)")
     except Exception:
         logger.error("Renderer replay loop error", exc_info=True)
     finally:
@@ -209,7 +215,8 @@ def main() -> None:
         frame_file = data_dir / _FRAME_FILE
         frame_file.unlink(missing_ok=True)
         (data_dir / _FRAME_FILE_TMP).unlink(missing_ok=True)
-        reader.close()
+        # Clean up journal file
+        reader.cleanup()
         streamer.stop()
         logger.info("Renderer exiting")
 

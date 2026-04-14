@@ -214,10 +214,11 @@ class EmulatorClient:
         return self._call("start_video_stream", name=name, port=port)
 
     def stop_video_stream(self) -> dict:
-        """Stop the HLS video stream and kill the renderer subprocess.
+        """Stop the HLS video stream and signal the renderer to finish.
 
-        Idempotent — returns success with a "No video stream running." message
-        if no stream is active.
+        In async mode the renderer continues independently to complete the
+        recording.  Idempotent — returns success with a "No video stream
+        running." message if no stream is active.
         """
         return self._call("stop_video_stream")
 

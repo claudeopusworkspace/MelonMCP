@@ -12,6 +12,7 @@ def clean_env(monkeypatch):
     """Ensure stream-related env vars are unset for each test."""
     monkeypatch.delenv("MELONDS_STREAM", raising=False)
     monkeypatch.delenv("MELONDS_NO_STREAM", raising=False)
+    monkeypatch.delenv("MELONDS_STREAM_PACING", raising=False)
 
 
 @pytest.fixture
@@ -156,3 +157,49 @@ def test_get_stream_override_reports_current_value(clean_env, stub_settings):
     assert settings_mod.get_stream_override() is False
     settings_mod.set_stream_override(None)
     assert settings_mod.get_stream_override() is None
+
+
+# ── Stream pacing ─────────────────────────────────────────────────
+
+
+def test_stream_pacing_defaults_to_async(clean_env, stub_settings):
+    stub_settings({})
+    assert settings_mod.get_stream_pacing() == "async"
+
+
+def test_stream_pacing_reads_json(clean_env, stub_settings):
+    stub_settings({"stream_pacing": "live"})
+    assert settings_mod.get_stream_pacing() == "live"
+
+    stub_settings({"stream_pacing": "async"})
+    assert settings_mod.get_stream_pacing() == "async"
+
+
+def test_stream_pacing_env_overrides_json(monkeypatch, clean_env, stub_settings):
+    stub_settings({"stream_pacing": "async"})
+    monkeypatch.setenv("MELONDS_STREAM_PACING", "live")
+    assert settings_mod.get_stream_pacing() == "live"
+
+
+def test_stream_pacing_env_case_insensitive(monkeypatch, clean_env, stub_settings):
+    stub_settings({})
+    monkeypatch.setenv("MELONDS_STREAM_PACING", "LIVE")
+    assert settings_mod.get_stream_pacing() == "live"
+
+
+def test_stream_pacing_env_empty_falls_through(monkeypatch, clean_env, stub_settings):
+    stub_settings({"stream_pacing": "live"})
+    monkeypatch.setenv("MELONDS_STREAM_PACING", "")
+    assert settings_mod.get_stream_pacing() == "live"
+
+
+def test_stream_pacing_env_invalid_raises(monkeypatch, clean_env, stub_settings):
+    stub_settings({})
+    monkeypatch.setenv("MELONDS_STREAM_PACING", "turbo")
+    with pytest.raises(ValueError, match="MELONDS_STREAM_PACING"):
+        settings_mod.get_stream_pacing()
+
+
+def test_stream_pacing_json_invalid_defaults_async(clean_env, stub_settings):
+    stub_settings({"stream_pacing": "turbo"})
+    assert settings_mod.get_stream_pacing() == "async"

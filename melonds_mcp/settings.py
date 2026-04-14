@@ -84,6 +84,39 @@ def get_stream_override() -> bool | None:
     return _stream_override
 
 
+def get_stream_pacing() -> str:
+    """Return the stream pacing mode: ``"live"`` or ``"async"``.
+
+    In **live** mode the emulator waits for the renderer after each
+    frame-advancing call (both MCP tools and bridge), keeping the HLS
+    stream within ~30 s of real-time.
+
+    In **async** mode the emulator runs at full speed and the renderer
+    catches up independently — even after the MCP server has exited.
+
+    Resolution order (first match wins):
+        0. MELONDS_STREAM_PACING env var ("live" or "async")
+        1. settings.json / settings.default.json  ``"stream_pacing"`` key
+        2. Default: ``"async"``
+    """
+    raw = os.environ.get("MELONDS_STREAM_PACING", "").strip().lower()
+    if raw in ("live", "async"):
+        return raw
+    if raw:
+        raise ValueError(
+            f"Invalid value for MELONDS_STREAM_PACING={raw!r}; "
+            f"expected 'live' or 'async'"
+        )
+    settings = load_settings()
+    value = settings.get("stream_pacing", "async")
+    if value not in ("live", "async"):
+        logger.warning(
+            "Invalid stream_pacing=%r in settings, defaulting to 'async'", value
+        )
+        return "async"
+    return value
+
+
 def get_stream() -> bool:
     """Return the stream setting: whether to auto-start viewer, HLS stream, and recording on ROM load.
 

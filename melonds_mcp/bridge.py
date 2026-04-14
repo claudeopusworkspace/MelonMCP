@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 # Maximum request size (64 KB should be plenty for any single call)
 MAX_REQUEST_SIZE = 65536
 
+# Bridge methods that advance emulation frames and should wait for the
+# renderer to catch up in live pacing mode (mirrors _CATCHUP_TOOLS in server.py).
+_PACING_METHODS = {
+    "advance_frames", "advance_frames_until", "advance_frame",
+    "press_buttons", "tap_touch_screen", "cycle",
+}
+
 
 class BridgeServer:
     """Unix socket server that dispatches JSON-RPC-like calls to EmulatorState."""
@@ -74,15 +81,13 @@ class BridgeServer:
     # -- Journal helper --
 
     def _journal_write(self, method: str, **kwargs) -> None:
-        """Write a journal entry if the journal is active."""
+        """Write a journal entry if the journal is active.
+
+        The journal is a durable file — writes are safe regardless of
+        whether the renderer is currently running.
+        """
         j = getattr(self._holder, "_journal", None)
         if j is None:
-            return
-        proc = getattr(self._holder, "_renderer_proc", None)
-        if proc and proc.poll() is not None:
-            self._holder._renderer_proc = None
-            j.stop()
-            self._holder._journal = None
             return
         getattr(j, method)(**kwargs)
 
@@ -398,13 +403,20 @@ class BridgeServer:
                     )
                 else:
                     logger.debug("Bridge dispatch %s completed in %.3fs", method, elapsed)
-                return json.dumps({"result": result})
             except Exception as e:
                 logger.warning(
                     "Bridge dispatch error: method=%s error=%s (peer=%s)",
                     method, e, peer, exc_info=True,
                 )
                 return json.dumps({"error": f"{type(e).__name__}: {e}"})
+
+        # Stream catchup runs AFTER the lock is released so other tools
+        # aren't blocked while we wait for the renderer.
+        if method in _PACING_METHODS:
+            from .server import _wait_for_stream_catchup
+            _wait_for_stream_catchup(self._holder)
+
+        return json.dumps({"result": result})
 
 
 def _summarize_params(params: dict) -> str:

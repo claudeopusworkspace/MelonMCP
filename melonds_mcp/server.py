@@ -55,8 +55,13 @@ def _wait_for_stream_catchup(holder: EmulatorState, timeout: int = _CATCHUP_TIME
     """Block until the renderer is within 30 s of the main emulator frame.
 
     Called *after* releasing the emulator lock so other tools can proceed.
-    No-op when no renderer is running.
+    No-op when no renderer is running or when stream pacing is ``"async"``.
     """
+    from .settings import get_stream_pacing
+
+    if get_stream_pacing() != "live":
+        return
+
     proc = getattr(holder, "_renderer_proc", None)
     if proc is None or proc.poll() is not None:
         return
@@ -307,7 +312,7 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
         }
 
     holder._require_rom()
-    journal_sock = str(holder.data_dir / ".melonds_journal.sock")
+    journal_path = str(holder.data_dir / ".melonds_journal.jsonl")
 
     # Save current state so the renderer can start from the same point
     initial_state = None
@@ -316,21 +321,24 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
         holder.emu.savestate_save(initial_state)
         logger.info("Saved initial state for renderer at frame %d", holder.frame_count)
 
-    # Start journal writer
-    journal = JournalWriter(journal_sock)
+    # Start journal writer (append-only JSONL file)
+    journal = JournalWriter(journal_path)
     journal.start()
     holder._journal = journal
 
     # Record the starting frame so commentary stream_time can be computed
     holder._stream_start_frame = holder.frame_count
 
-    # Launch renderer subprocess
+    # Build renderer command
+    renderer_log = str(holder.data_dir / ".renderer.log")
     cmd = [
         sys.executable, "-m", "melonds_mcp.renderer",
-        "--journal-sock", journal_sock,
+        "--journal-file", journal_path,
         "--rom", holder.rom_path,
         "--port", str(port),
         "--data-dir", str(holder.data_dir),
+        "--server-pid", str(os.getpid()),
+        "--log-file", renderer_log,
     ]
     if initial_state:
         cmd += ["--initial-state", initial_state]
@@ -341,12 +349,17 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
         recordings_dir.mkdir(exist_ok=True)
         cmd += ["--record-dir", str(recordings_dir), "--record-name", name]
 
+    # Launch renderer in its own session so it survives MCP server exit
     renderer_proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
     holder._renderer_proc = renderer_proc
     logger.info(
-        "Renderer subprocess launched (pid=%d, port=%d)", renderer_proc.pid, port,
+        "Renderer subprocess launched (pid=%d, port=%d, log=%s)",
+        renderer_proc.pid, port, renderer_log,
     )
 
     # Tell the viewer about the HLS port so the unified page can load video
@@ -364,6 +377,10 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
 
 
 def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
+    import subprocess
+
+    from .settings import get_stream_pacing
+
     logger.info("Tool: stop_video_stream")
     journal = getattr(holder, "_journal", None)
     proc = getattr(holder, "_renderer_proc", None)
@@ -376,34 +393,44 @@ def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
     if viewer is not None:
         viewer.set_journal(None)
 
-    # Send shutdown via journal, then stop the writer (which closes the
-    # socket — the renderer will see either the shutdown entry or a socket
-    # close, both of which cause it to exit its replay loop).
+    # Write shutdown entry and close the journal file.
     if journal:
         try:
             journal.write_shutdown()
         except Exception:
-            logger.warning("Failed to send journal shutdown", exc_info=True)
+            logger.warning("Failed to write journal shutdown", exc_info=True)
         journal.stop()
 
-    # Wait for renderer to exit gracefully
+    pacing = get_stream_pacing()
     if proc and proc.poll() is None:
-        try:
-            proc.wait(timeout=8.0)
-            logger.info("Renderer exited (code=%d)", proc.returncode)
-        except subprocess.TimeoutExpired:
-            logger.warning("Renderer did not exit in 8s, terminating")
-            proc.terminate()
+        if pacing == "live":
+            # In live mode the renderer should be close to caught up — wait
+            # a reasonable amount of time then terminate if stuck.
             try:
-                proc.wait(timeout=3.0)
+                proc.wait(timeout=15.0)
+                logger.info("Renderer exited (code=%d)", proc.returncode)
             except subprocess.TimeoutExpired:
-                logger.warning("Renderer did not terminate, killing")
-                proc.kill()
-                proc.wait(timeout=2.0)
+                logger.warning("Renderer did not exit in 15s, terminating")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+        else:
+            # In async mode the renderer runs independently and will
+            # finish on its own after processing all journal entries.
+            logger.info(
+                "Async mode — renderer (pid=%d) will finish independently",
+                proc.pid,
+            )
 
     holder._journal = None
     holder._renderer_proc = None
-    return {"success": True, "message": "Video stream stopped."}
+    msg = "Video stream stopped."
+    if pacing != "live" and proc and proc.poll() is None:
+        msg += f" Renderer (pid={proc.pid}) is still finishing the recording."
+    return {"success": True, "message": msg}
 
 
 

@@ -1,10 +1,14 @@
-"""Input journal for the rendering emulator — one-way stream of replay events.
+"""Input journal for the rendering emulator — durable stream of replay events.
 
-The main emulator writes journal entries as it processes MCP commands.
-A separate rendering process reads them and replays at real-time 60fps
-for the HLS video stream.
+The main emulator writes journal entries as it processes MCP/bridge commands.
+A separate rendering process reads them and replays at its own pace for the HLS
+video stream and session recording.
 
-Protocol: line-delimited JSON over a Unix domain socket.
+Transport: append-only JSONL file, tail-followed by the reader.
+
+This design decouples the renderer from the MCP server's process lifecycle.
+The renderer survives server exit, drains remaining journal entries, and
+finalises the recording before exiting.
 
 Entry types:
   {"type":"frames","count":N,"buttons":[...],"touch_x":X,"touch_y":Y}
@@ -12,6 +16,7 @@ Entry types:
   {"type":"reset"}
   {"type":"load_rom","rom_path":"/abs/path/to/rom.nds"}
   {"type":"commentary","stream_time":12.5,"text":"...","style":"normal"}
+  {"type":"sync","state_path":"/abs/path/to/state.dst"}
   {"type":"shutdown"}
 """
 
@@ -20,85 +25,51 @@ from __future__ import annotations
 import json
 import logging
 import os
-import queue
-import socket
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Queue capacity — ~33 seconds of single-frame entries at 60fps.
-_QUEUE_MAXSIZE = 2000
-
 
 class JournalWriter:
-    """Writes journal entries to a Unix domain socket for the renderer.
+    """Writes journal entries to an append-only JSONL file.
 
-    Runs a background thread that accepts one connection from the renderer
-    and drains entries from an internal queue to the socket.
+    All writes are durable — no queue, no drops.  A threading lock ensures
+    safety when the MCP tool thread and bridge thread write concurrently.
     """
 
-    def __init__(self, socket_path: str) -> None:
-        self._socket_path = socket_path
-        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=_QUEUE_MAXSIZE)
-        self._thread: threading.Thread | None = None
-        self._server_sock: socket.socket | None = None
+    def __init__(self, journal_path: str) -> None:
+        self._journal_path = journal_path
+        self._file = None
+        self._lock = threading.Lock()
         self._running = False
-        self._connected = False
-        self._drop_count = 0
+        self._shutdown_written = False
 
     @property
-    def socket_path(self) -> str:
-        return self._socket_path
-
-    @property
-    def connected(self) -> bool:
-        return self._connected
+    def journal_path(self) -> str:
+        return self._journal_path
 
     def start(self) -> str:
-        """Bind the socket and start the writer thread. Returns socket path."""
-        # Clean up stale socket
-        Path(self._socket_path).unlink(missing_ok=True)
-
-        self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._server_sock.bind(self._socket_path)
-        self._server_sock.listen(1)
-        self._server_sock.settimeout(1.0)
+        """Create the journal file and mark as running.  Returns the path."""
+        Path(self._journal_path).unlink(missing_ok=True)
+        self._file = open(self._journal_path, "a")
         self._running = True
-
-        self._thread = threading.Thread(
-            target=self._writer_loop, name="journal-writer", daemon=True
-        )
-        self._thread.start()
-        logger.info("Journal writer started on %s", self._socket_path)
-        return self._socket_path
+        logger.info("Journal writer started: %s", self._journal_path)
+        return self._journal_path
 
     def stop(self) -> None:
-        """Send shutdown and clean up."""
+        """Write a shutdown entry (if not already written), close the file."""
         if not self._running:
             return
         self._running = False
-        # Enqueue shutdown sentinel — don't block if queue is full, just force it
-        try:
-            self._queue.put_nowait(None)
-        except queue.Full:
-            # Clear some space and retry
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait(None)
-            except queue.Full:
-                pass
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5.0)
-        if self._server_sock:
-            try:
-                self._server_sock.close()
-            except OSError:
-                pass
-        Path(self._socket_path).unlink(missing_ok=True)
+        if not self._shutdown_written:
+            self._shutdown_written = True
+            self._write_entry({"type": "shutdown"})
+        with self._lock:
+            if self._file:
+                self._file.close()
+                self._file = None
         logger.info("Journal writer stopped")
 
     # ── Public write methods ──
@@ -110,179 +81,155 @@ class JournalWriter:
         touch_x: int | None = None,
         touch_y: int | None = None,
     ) -> None:
-        """Write a frames entry. Non-blocking — drops if queue is full."""
-        entry = json.dumps({
+        self._write_entry({
             "type": "frames",
             "count": count,
             "buttons": buttons,
             "touch_x": touch_x,
             "touch_y": touch_y,
         })
-        try:
-            self._queue.put_nowait(entry)
-        except queue.Full:
-            self._drop_count += 1
-            if self._drop_count == 1 or self._drop_count % 300 == 0:
-                logger.warning(
-                    "Journal queue full — dropped frame entry (total drops: %d)",
-                    self._drop_count,
-                )
 
     def write_load_state(self, path: str) -> None:
-        """Write a load_state entry. Blocks until queued (never dropped)."""
-        entry = json.dumps({"type": "load_state", "path": path})
-        self._queue.put(entry)  # blocking
+        self._write_entry({"type": "load_state", "path": path})
 
     def write_reset(self) -> None:
-        """Write a reset entry. Blocks until queued (never dropped)."""
-        entry = json.dumps({"type": "reset"})
-        self._queue.put(entry)
+        self._write_entry({"type": "reset"})
 
     def write_load_rom(self, rom_path: str) -> None:
-        """Write a load_rom entry. Blocks until queued (never dropped)."""
-        entry = json.dumps({"type": "load_rom", "rom_path": rom_path})
-        self._queue.put(entry)
+        self._write_entry({"type": "load_rom", "rom_path": rom_path})
 
     def write_sync(self, state_path: str) -> None:
-        """Write a sync entry. Blocks until queued (never dropped).
-
-        The renderer loads this savestate to jump ahead when it falls
-        too far behind the main emulator.
-        """
-        entry = json.dumps({"type": "sync", "state_path": state_path})
-        self._queue.put(entry)  # blocking
+        self._write_entry({"type": "sync", "state_path": state_path})
 
     def write_commentary(
         self, stream_time: float, text: str, style: str = "normal"
     ) -> None:
-        """Write a commentary entry. Non-blocking — drops if queue is full."""
-        entry = json.dumps({
+        self._write_entry({
             "type": "commentary",
             "stream_time": stream_time,
             "text": text,
             "style": style,
         })
-        try:
-            self._queue.put_nowait(entry)
-        except queue.Full:
-            self._drop_count += 1
-            logger.warning("Journal queue full — dropped commentary entry")
 
     def write_shutdown(self) -> None:
-        """Write a shutdown entry. Blocks until queued (never dropped)."""
-        entry = json.dumps({"type": "shutdown"})
-        self._queue.put(entry)
+        if not self._shutdown_written:
+            self._shutdown_written = True
+            self._write_entry({"type": "shutdown"})
 
-    # ── Background thread ──
+    # ── Internal ──
 
-    def _writer_loop(self) -> None:
-        """Accept one connection, then drain queue to socket until shutdown."""
-        conn: socket.socket | None = None
-        try:
-            conn = self._accept_connection()
-            if conn is None:
+    def _write_entry(self, entry: dict) -> None:
+        """Append a JSON line to the journal file.  Thread-safe and flushed."""
+        with self._lock:
+            if self._file is None:
                 return
-            self._connected = True
-            logger.info("Journal renderer connected")
-            self._drain_to_socket(conn)
-        except Exception:
-            logger.warning("Journal writer thread error", exc_info=True)
-        finally:
-            self._connected = False
-            if conn:
-                try:
-                    conn.close()
-                except OSError:
-                    pass
-
-    def _accept_connection(self) -> socket.socket | None:
-        """Wait for a renderer to connect. Returns None if shutting down."""
-        while self._running:
-            try:
-                conn, _ = self._server_sock.accept()
-                conn.settimeout(5.0)
-                return conn
-            except socket.timeout:
-                continue
-            except OSError:
-                if self._running:
-                    logger.warning("Journal accept error", exc_info=True)
-                return None
-        return None
-
-    def _drain_to_socket(self, conn: socket.socket) -> None:
-        """Read entries from queue and write to socket until shutdown."""
-        while self._running or not self._queue.empty():
-            try:
-                entry = self._queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-
-            if entry is None:
-                # Shutdown sentinel — send shutdown entry then exit
-                try:
-                    conn.sendall(b'{"type":"shutdown"}\n')
-                except OSError:
-                    pass
-                return
-
-            try:
-                conn.sendall(entry.encode("utf-8") + b"\n")
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                logger.warning("Journal socket broken — renderer disconnected")
-                self._connected = False
-                return
+            self._file.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            self._file.flush()
 
 
 class JournalReader:
-    """Reads journal entries from a Unix domain socket.
+    """Reads journal entries by tail-following a JSONL file.
 
-    Used by the rendering process to consume entries from the main emulator.
-    Iterable — yields parsed JSON dicts. Blocks on recv.
+    Used by the rendering process to consume entries written by the main
+    emulator.  Iterable — yields parsed JSON dicts.  Blocks between entries.
+
+    Stops when it sees a ``shutdown`` entry, or when the server PID is no
+    longer alive and no new data arrives for 1 second.
     """
 
-    def __init__(self, socket_path: str) -> None:
-        self._socket_path = socket_path
-        self._sock: socket.socket | None = None
-        self._buf = b""
+    def __init__(self, journal_path: str, server_pid: int | None = None) -> None:
+        self._journal_path = journal_path
+        self._server_pid = server_pid
+        self._file = None
+        self._shutdown_seen = False
 
     def connect(self) -> None:
-        """Connect to the journal socket."""
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.connect(self._socket_path)
-        logger.info("Journal reader connected to %s", self._socket_path)
+        """Open the journal file for reading.
+
+        Retries briefly if the file doesn't exist yet (the writer may not
+        have created it by the time we try to open).
+        """
+        for attempt in range(20):
+            try:
+                self._file = open(self._journal_path, "r")
+                logger.info("Journal reader opened %s", self._journal_path)
+                return
+            except FileNotFoundError:
+                if attempt >= 19:
+                    raise
+                time.sleep(0.25)
 
     def close(self) -> None:
-        """Close the socket connection."""
-        if self._sock:
+        if self._file:
             try:
-                self._sock.close()
+                self._file.close()
             except OSError:
                 pass
-            self._sock = None
+            self._file = None
+
+    def cleanup(self) -> None:
+        """Remove the journal file from disk."""
+        self.close()
+        try:
+            Path(self._journal_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.info("Journal file cleaned up: %s", self._journal_path)
 
     def __iter__(self):
         return self
 
     def __next__(self) -> dict:
-        """Read and return the next journal entry. Blocks until available."""
-        while True:
-            # Check if we have a complete line in the buffer
-            newline_pos = self._buf.find(b"\n")
-            if newline_pos >= 0:
-                line = self._buf[:newline_pos]
-                self._buf = self._buf[newline_pos + 1:]
-                if line:
-                    return json.loads(line.decode("utf-8"))
-                continue  # empty line, skip
+        """Read and return the next journal entry.  Blocks until available.
 
-            # Need more data
-            if self._sock is None:
+        Uses a tail-follow pattern: reads lines from the file, and when at
+        EOF polls every 50 ms for new data.  Stops on shutdown entry or
+        server death + sustained EOF.
+        """
+        eof_since: float | None = None
+
+        while True:
+            pos = self._file.tell()
+            raw = self._file.readline()
+
+            if raw.endswith("\n"):
+                # Complete line — parse and return
+                eof_since = None
+                line = raw.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if entry.get("type") == "shutdown":
+                    self._shutdown_seen = True
+                return entry
+
+            # No complete line (empty string = EOF, or partial write)
+            if raw:
+                # Partial line — seek back so we re-read it next time
+                self._file.seek(pos)
+
+            if self._shutdown_seen:
                 raise StopIteration
-            try:
-                chunk = self._sock.recv(65536)
-            except OSError:
-                raise StopIteration
-            if not chunk:
-                raise StopIteration
-            self._buf += chunk
+
+            # Track how long we've been at EOF
+            now = time.monotonic()
+            if eof_since is None:
+                eof_since = now
+
+            # If at EOF for >1s, check server liveness
+            if now - eof_since > 1.0 and self._server_pid is not None:
+                if not self._is_pid_alive():
+                    raise StopIteration
+
+            time.sleep(0.05)
+
+    def _is_pid_alive(self) -> bool:
+        """Check if the server PID is still running."""
+        try:
+            os.kill(self._server_pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Process exists but we can't signal it — still alive
+            return True
