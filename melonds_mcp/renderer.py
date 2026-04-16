@@ -4,7 +4,7 @@ Launched as a subprocess by the main MCP server (with its own session so it
 survives server exit):
 
     python -m melonds_mcp.renderer --journal-file <path> --rom <path> \
-        [--initial-state <path>] --port <port> --data-dir <path> \
+        --frame-file <path> [--initial-state <path>] --port <port> \
         [--server-pid <pid>] [--record-dir <dir>] [--record-name <name>] \
         [--log-file <path>]
 
@@ -28,11 +28,6 @@ import time
 from pathlib import Path
 
 logger = logging.getLogger("melonds_mcp.renderer")
-
-# Filename for the atomic frame-position file read by the main process.
-_FRAME_FILE = ".renderer_frame"
-_FRAME_FILE_TMP = ".renderer_frame.tmp"
-
 
 def _setup_logging(log_file: str | None = None) -> None:
     """Configure logging for the renderer process.
@@ -59,7 +54,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rom", required=True, help="Path to NDS ROM file")
     parser.add_argument("--initial-state", default=None, help="Path to initial savestate")
     parser.add_argument("--port", type=int, default=18091, help="HLS stream HTTP port")
-    parser.add_argument("--data-dir", required=True, help="Data directory for frame position file")
+    parser.add_argument("--frame-file", required=True, help="Path to atomic frame-position file")
     parser.add_argument("--server-pid", type=int, default=None, help="PID of the MCP server (for liveness detection)")
     parser.add_argument("--record-dir", default=None, help="Directory for recording output (enables recording)")
     parser.add_argument("--record-name", default="unnamed", help="Name for the recording session")
@@ -67,23 +62,22 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _write_frame_position(data_dir: Path, emulator_frame: int, stream_frame: int) -> None:
+def _write_frame_position(frame_file: Path, emulator_frame: int, stream_frame: int) -> None:
     """Atomically write the renderer's current frame position for the main process."""
-    tmp_path = data_dir / _FRAME_FILE_TMP
-    final_path = data_dir / _FRAME_FILE
+    tmp_path = frame_file.with_suffix(frame_file.suffix + ".tmp")
     payload = json.dumps({"emulator_frame": emulator_frame, "stream_frame": stream_frame})
     tmp_path.write_text(payload)
-    os.replace(str(tmp_path), str(final_path))
+    os.replace(str(tmp_path), str(frame_file))
 
 
 def main() -> None:
     args = _parse_args()
     _setup_logging(args.log_file)
-    data_dir = Path(args.data_dir)
+    frame_file = Path(args.frame_file)
 
     logger.info(
-        "Renderer starting: rom=%s port=%d data_dir=%s initial_state=%s server_pid=%s",
-        args.rom, args.port, args.data_dir, args.initial_state, args.server_pid,
+        "Renderer starting: rom=%s port=%d frame_file=%s initial_state=%s server_pid=%s",
+        args.rom, args.port, args.frame_file, args.initial_state, args.server_pid,
     )
 
     from .emulator import EmulatorState
@@ -130,7 +124,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _sigterm_handler)
 
     # Write initial frame position
-    _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)
+    _write_frame_position(frame_file, holder.frame_count, streamer._rt_frames)
 
     # Main replay loop
     try:
@@ -201,7 +195,7 @@ def main() -> None:
                 logger.warning("Unknown journal entry type: %s", entry_type)
 
             # Update frame position file after every journal entry
-            _write_frame_position(data_dir, holder.frame_count, streamer._rt_frames)
+            _write_frame_position(frame_file, holder.frame_count, streamer._rt_frames)
 
     except StopIteration:
         logger.info("Journal ended (server exited or no more entries)")
@@ -212,9 +206,8 @@ def main() -> None:
         if recorder is not None:
             recorder.stop()
         # Clean up frame position file
-        frame_file = data_dir / _FRAME_FILE
         frame_file.unlink(missing_ok=True)
-        (data_dir / _FRAME_FILE_TMP).unlink(missing_ok=True)
+        frame_file.with_suffix(frame_file.suffix + ".tmp").unlink(missing_ok=True)
         # Clean up journal file
         reader.cleanup()
         streamer.stop()

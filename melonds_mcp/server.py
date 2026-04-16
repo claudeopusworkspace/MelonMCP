@@ -66,7 +66,9 @@ def _wait_for_stream_catchup(holder: EmulatorState, timeout: int = _CATCHUP_TIME
     if proc is None or proc.poll() is not None:
         return
 
-    frame_file = holder.data_dir / ".renderer_frame"
+    frame_file = getattr(holder, "_renderer_frame_file", None)
+    if frame_file is None:
+        return
     deadline = time.monotonic() + timeout
     resync_sent = False
 
@@ -99,7 +101,7 @@ def _trigger_resync(holder: EmulatorState) -> None:
     journal = getattr(holder, "_journal", None)
     if journal is None:
         return
-    sync_path = str(holder.data_dir / ".renderer_sync.mst")
+    sync_path = str(holder.data_dir / f".renderer_sync_{os.getpid()}.mst")
     with holder.lock:
         if holder.emu is not None:
             holder.emu.savestate_save(sync_path)
@@ -294,6 +296,7 @@ def _tool_start_viewer(holder: EmulatorState, port: int = 8090) -> dict[str, Any
 
 
 def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str = "unnamed") -> dict[str, Any]:
+    import socket
     import subprocess
     import sys
 
@@ -304,20 +307,44 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
     # Check if renderer is already running
     proc = getattr(holder, "_renderer_proc", None)
     if proc is not None and proc.poll() is None:
+        existing_port = getattr(holder, "_renderer_port", port)
         logger.debug("Renderer already running (pid=%d)", proc.pid)
         return {
             "success": True,
             "message": f"Video stream already running (renderer pid={proc.pid}).",
-            "url": f"http://localhost:{port}",
+            "url": f"http://localhost:{existing_port}",
         }
 
     holder._require_rom()
-    journal_path = str(holder.data_dir / ".melonds_journal.jsonl")
+
+    # Probe for a free port starting at the requested one. A detached renderer
+    # from a prior session may still be holding the default, so we step up
+    # rather than fail to bind in the subprocess.
+    chosen_port = port
+    for candidate in range(port, port + 100):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind(("0.0.0.0", candidate))
+                chosen_port = candidate
+                break
+            except OSError:
+                continue
+    else:
+        raise RuntimeError(f"No free port found in range {port}-{port + 99}")
+    if chosen_port != port:
+        logger.info("Port %d busy, using %d instead", port, chosen_port)
+
+    # Namespace per-session renderer files by server PID so a detached
+    # renderer from a previous session cannot collide with ours.
+    pid = os.getpid()
+    journal_path = str(holder.data_dir / f".melonds_journal_{pid}.jsonl")
+    frame_file = holder.data_dir / f".renderer_frame_{pid}"
+    renderer_log = str(holder.data_dir / f".renderer_{pid}.log")
 
     # Save current state so the renderer can start from the same point
     initial_state = None
     if holder.frame_count > 0:
-        initial_state = str(holder.data_dir / ".renderer_initial.mst")
+        initial_state = str(holder.data_dir / f".renderer_initial_{pid}.mst")
         holder.emu.savestate_save(initial_state)
         logger.info("Saved initial state for renderer at frame %d", holder.frame_count)
 
@@ -325,19 +352,20 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
     journal = JournalWriter(journal_path)
     journal.start()
     holder._journal = journal
+    holder._renderer_frame_file = frame_file
+    holder._renderer_port = chosen_port
 
     # Record the starting frame so commentary stream_time can be computed
     holder._stream_start_frame = holder.frame_count
 
     # Build renderer command
-    renderer_log = str(holder.data_dir / ".renderer.log")
     cmd = [
         sys.executable, "-m", "melonds_mcp.renderer",
         "--journal-file", journal_path,
         "--rom", holder.rom_path,
-        "--port", str(port),
-        "--data-dir", str(holder.data_dir),
-        "--server-pid", str(os.getpid()),
+        "--port", str(chosen_port),
+        "--frame-file", str(frame_file),
+        "--server-pid", str(pid),
         "--log-file", renderer_log,
     ]
     if initial_state:
@@ -359,20 +387,20 @@ def _tool_start_video_stream(holder: EmulatorState, port: int = 18091, name: str
     holder._renderer_proc = renderer_proc
     logger.info(
         "Renderer subprocess launched (pid=%d, port=%d, log=%s)",
-        renderer_proc.pid, port, renderer_log,
+        renderer_proc.pid, chosen_port, renderer_log,
     )
 
     # Tell the viewer about the HLS port so the unified page can load video
     viewer = getattr(holder, "_viewer", None)
     if viewer is not None:
-        viewer.set_hls_port(port)
+        viewer.set_hls_port(chosen_port)
         viewer._stream_start_frame = holder.frame_count
         viewer.set_journal(journal)
 
     return {
         "success": True,
-        "message": f"HLS video stream started on port {port} (renderer pid={renderer_proc.pid}).",
-        "url": f"http://localhost:{port}",
+        "message": f"HLS video stream started on port {chosen_port} (renderer pid={renderer_proc.pid}).",
+        "url": f"http://localhost:{chosen_port}",
     }
 
 
@@ -427,6 +455,8 @@ def _tool_stop_video_stream(holder: EmulatorState) -> dict[str, Any]:
 
     holder._journal = None
     holder._renderer_proc = None
+    holder._renderer_frame_file = None
+    holder._renderer_port = None
     msg = "Video stream stopped."
     if pacing != "live" and proc and proc.poll() is None:
         msg += f" Renderer (pid={proc.pid}) is still finishing the recording."
