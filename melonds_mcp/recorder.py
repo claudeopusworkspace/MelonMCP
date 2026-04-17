@@ -24,6 +24,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .constants import DS_FRAMERATE, DS_FRAMERATE_DEN, DS_FRAMERATE_NUM
+
 logger = logging.getLogger(__name__)
 
 # DS constants (must match streamer.py)
@@ -31,8 +33,9 @@ _FRAME_WIDTH = 256
 _FRAME_HEIGHT = 384
 _FRAME_RGB_SIZE = _FRAME_WIDTH * _FRAME_HEIGHT * 3
 _SAMPLE_RATE = 48000
+# Rounded rate for keyframe interval only.  True DS rate (DS_FRAMERATE)
+# is what we report to ffmpeg and use for duration math.
 _FPS = 60
-_SAMPLES_PER_FRAME = _SAMPLE_RATE // _FPS  # 800
 
 
 class SessionRecorder:
@@ -80,7 +83,7 @@ class SessionRecorder:
 
     def _flush_json(self) -> None:
         """Atomically write the current metadata to the companion JSON file."""
-        duration = self._frames_written / _FPS
+        duration = self._frames_written / DS_FRAMERATE
         with self._commentary_lock:
             commentary = list(self._commentary)
         meta = {
@@ -131,7 +134,7 @@ class SessionRecorder:
             "-f", "rawvideo",
             "-pixel_format", "rgb24",
             "-video_size", f"{_FRAME_WIDTH}x{_FRAME_HEIGHT}",
-            "-framerate", str(_FPS),
+            "-framerate", f"{DS_FRAMERATE_NUM}/{DS_FRAMERATE_DEN}",
             "-i", str(self._video_fifo),
             # Audio input
             "-probesize", "32",
@@ -197,8 +200,11 @@ class SessionRecorder:
                     except OSError:
                         pass
 
-                # Matching silence for primer frame
-                af.write(b"\x00" * (_SAMPLES_PER_FRAME * 4))
+                # Matching silence for primer frame.  Exact count doesn't
+                # matter for sync — ffmpeg timestamps audio by cumulative
+                # sample count, so this just becomes the first few ms of
+                # the track.
+                af.write(b"\x00" * 3200)
                 af.flush()
                 logger.info("Recorder FIFOs opened")
 

@@ -21,6 +21,14 @@ SCREENSHOT_RGBX_SIZE = TOTAL_PIXEL_COUNT * 4  # 393216 bytes
 # DS runs at ~60fps
 FRAMES_PER_SECOND = 60
 
+# Actual DS frame rate: ARM7 clock / cycles per frame.  Used for stream
+# timing so audio and video stay in sync over long sessions — a naive 60
+# fps assumption accumulates ~10 seconds of drift per hour because the
+# SPU emits 48000/59.8261 ≈ 802.3 samples per frame, not 800.
+DS_FRAMERATE_NUM = 33513982
+DS_FRAMERATE_DEN = 560190
+DS_FRAMERATE = DS_FRAMERATE_NUM / DS_FRAMERATE_DEN  # ≈ 59.8261 Hz
+
 
 class Key(IntEnum):
     """Key indices matching DS hardware KEYINPUT register bit positions."""

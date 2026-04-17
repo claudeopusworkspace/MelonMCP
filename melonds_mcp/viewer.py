@@ -23,6 +23,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .constants import DS_FRAMERATE
+
 if TYPE_CHECKING:
     from .emulator import EmulatorState
 
@@ -1158,7 +1160,7 @@ class ViewerServer:
 
     def add_commentary(self, frame: int, text: str, style: str = "normal") -> None:
         """Push a commentary event to all connected clients."""
-        stream_time = max(0.0, (frame - self._stream_start_frame) / 60.0)
+        stream_time = max(0.0, (frame - self._stream_start_frame) / DS_FRAMERATE)
         event_data = json.dumps({
             "frame": frame,
             "text": text,
