@@ -1516,13 +1516,13 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         return _tool_init_emulator(holder)
 
     @mcp.tool()
-    def load_rom(rom_path: str, name: str = "unnamed") -> dict[str, Any]:
+    def load_rom(rom_path: str, name: str) -> dict[str, Any]:
         """Load a Nintendo DS ROM (.nds) file. Requires init_emulator first.
 
         Args:
             rom_path: Path to the .nds ROM file.
             name: Name for the recording session (shown on the recordings page).
-                  Only used when auto-start is set to "stream". Defaults to "unnamed".
+                  Only used when auto-start is set to "stream".
         """
         return _tool_load_rom(holder, rom_path, name)
 

@@ -209,7 +209,7 @@ class EmulatorClient:
         """
         return self._call("set_stream_config", enabled=enabled)
 
-    def start_video_stream(self, name: str = "unnamed", port: int = 18091) -> dict:
+    def start_video_stream(self, name: str, port: int = 18091) -> dict:
         """Start the HLS video stream (launches the renderer subprocess)."""
         return self._call("start_video_stream", name=name, port=port)
 
