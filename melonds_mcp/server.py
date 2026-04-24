@@ -562,8 +562,15 @@ def _tool_advance_frames_until(
         read_addresses=read_addresses or None,
     )
     frames_elapsed = result["frames_elapsed"]
-    _journal_write(holder, "write_frames", count=frames_elapsed,
-                   buttons=buttons or None, touch_x=touch_x, touch_y=touch_y)
+    # advance_frames_until runs (frames_elapsed - 1) frames with the polling
+    # inputs held, then renders one trailing release frame. Mirror that split
+    # in the journal so the renderer replays inputs accurately.
+    polling_frames = max(frames_elapsed - 1, 0)
+    if polling_frames > 0:
+        _journal_write(holder, "write_frames", count=polling_frames,
+                       buttons=buttons or None, touch_x=touch_x, touch_y=touch_y)
+    _journal_write(holder, "write_frames", count=1, buttons=None,
+                   touch_x=None, touch_y=None)  # trailing release frame
     return result
 
 

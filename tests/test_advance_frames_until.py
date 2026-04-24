@@ -669,3 +669,46 @@ class TestAdvanceFramesUntilLoop:
                          "operator": "==", "value": 99}],
         )
         assert result["total_frame"] == state.frame_count
+
+    def test_trailing_frame_releases_buttons(self):
+        """Regression for issue #10: the post-trigger render frame must NOT
+        carry the polling buttons forward, otherwise chained calls (e.g. a
+        per-tile navigation primitive) commit one extra step of the previous
+        direction before the next call's input takes effect."""
+        from melonds_mcp.constants import buttons_to_bitmask
+
+        state = self._make_state()
+        state.emu.memory_read_byte.return_value = 1  # triggers immediately
+
+        state.advance_frames_until(
+            max_frames=10,
+            conditions=[{"type": "value", "address": 0x100, "size": "byte",
+                         "operator": "==", "value": 1}],
+            buttons=["right"],
+            touch_x=50,
+            touch_y=60,
+        )
+
+        # During the polling loop, "right" must have been held.
+        right_mask = buttons_to_bitmask(["right"])
+        keypad_calls = [c.args[0] for c in state.emu.input_keypad_update.call_args_list]
+        assert keypad_calls[0] == right_mask, "loop frame should hold polling buttons"
+
+        # The trailing render frame must release: final keypad update is 0,
+        # and touch is released (not re-set) on the way out.
+        assert keypad_calls[-1] == 0, (
+            f"trailing frame must release buttons, got bitmask {keypad_calls[-1]:#x}"
+        )
+        assert state.emu.input_release_touch.call_count >= 1
+
+    def test_trailing_frame_releases_when_no_polling_buttons(self):
+        """When buttons=None, behavior is unchanged: every frame is empty."""
+        state = self._make_state()
+        state.emu.memory_read_byte.return_value = 1
+        state.advance_frames_until(
+            max_frames=10,
+            conditions=[{"type": "value", "address": 0x100, "size": "byte",
+                         "operator": "==", "value": 1}],
+        )
+        keypad_calls = [c.args[0] for c in state.emu.input_keypad_update.call_args_list]
+        assert all(mask == 0 for mask in keypad_calls)

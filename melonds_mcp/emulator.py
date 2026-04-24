@@ -515,8 +515,11 @@ class EmulatorState:
         finally:
             emu.set_skip_render(False)
 
-        # Render one final frame for screenshot-ready state
-        self.advance_frame(buttons, touch_x, touch_y)
+        # Render one final frame for screenshot-ready state, with all inputs
+        # released. Holding the polling inputs through this trailing frame
+        # commits one extra step of the old input into the next call — see
+        # https://github.com/claudeopusworkspace/MelonMCP/issues/10.
+        self.advance_frame()
         frames += 1
 
         self._notify_frame_change()

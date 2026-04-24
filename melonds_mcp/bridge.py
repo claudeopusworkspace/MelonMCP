@@ -113,8 +113,13 @@ class BridgeServer:
         result = self._holder.advance_frames_until(
             max_frames, conditions, poll_interval, buttons, touch_x, touch_y, read_addresses,
         )
-        self._journal_write("write_frames", count=result["frames_elapsed"],
-                            buttons=buttons, touch_x=touch_x, touch_y=touch_y)
+        # Mirror the trailing release frame in the journal (see server.py).
+        polling_frames = max(result["frames_elapsed"] - 1, 0)
+        if polling_frames > 0:
+            self._journal_write("write_frames", count=polling_frames,
+                                buttons=buttons, touch_x=touch_x, touch_y=touch_y)
+        self._journal_write("write_frames", count=1, buttons=None,
+                            touch_x=None, touch_y=None)  # trailing release frame
         return result
 
     def _advance_frame(self, buttons: list[str] | None = None,
