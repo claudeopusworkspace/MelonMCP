@@ -445,6 +445,9 @@ class EmulatorState:
         touch_x: int | None = None,
         touch_y: int | None = None,
         read_addresses: list[dict] | None = None,
+        final_buttons: list[str] | None = None,
+        final_touch_x: int | None = None,
+        final_touch_y: int | None = None,
     ) -> dict:
         """Advance up to max_frames, returning early when a memory condition is met.
 
@@ -459,6 +462,13 @@ class EmulatorState:
             touch_x: Touchscreen X position.
             touch_y: Touchscreen Y position.
             read_addresses: Additional addresses to read on return.
+            final_buttons: Buttons to press on the trailing render frame. If any of
+                final_buttons/final_touch_x/final_touch_y is set, the trailing
+                frame uses those inputs instead of releasing all inputs. This
+                lets chained calls hand off the next frame's input without a
+                gap (see issue #12).
+            final_touch_x: Touchscreen X for the trailing render frame.
+            final_touch_y: Touchscreen Y for the trailing render frame.
 
         Returns:
             Dict with triggered, condition_index, frames_elapsed, total_frame,
@@ -515,11 +525,16 @@ class EmulatorState:
         finally:
             emu.set_skip_render(False)
 
-        # Render one final frame for screenshot-ready state, with all inputs
-        # released. Holding the polling inputs through this trailing frame
-        # commits one extra step of the old input into the next call — see
-        # https://github.com/claudeopusworkspace/MelonMCP/issues/10.
-        self.advance_frame()
+        # Render one final frame for screenshot-ready state. By default, all
+        # inputs are released — holding the polling inputs through this
+        # trailing frame commits one extra step of the old input into the next
+        # call (see issue #10). Callers can override the trailing frame's
+        # inputs via final_buttons/final_touch_* to hand off cleanly into a
+        # chained call without a gap (see issue #12).
+        if final_buttons is not None or final_touch_x is not None or final_touch_y is not None:
+            self.advance_frame(final_buttons, final_touch_x, final_touch_y)
+        else:
+            self.advance_frame()
         frames += 1
 
         self._notify_frame_change()

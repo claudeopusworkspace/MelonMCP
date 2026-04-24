@@ -223,6 +223,22 @@ class TestValidation:
         )
         holder.advance_frames_until.assert_called_once()
 
+    def test_final_buttons_forwarded_to_holder(self):
+        """Issue #12: final_buttons/final_touch_* should reach the emulator."""
+        holder = _make_holder()
+        _tool_advance_frames_until(
+            holder, 100,
+            [{"type": "value", "address": 0x02000000, "operator": "==", "value": 1}],
+            1, ["right"], None, None, [],
+            final_buttons=["up"],
+            final_touch_x=120,
+            final_touch_y=80,
+        )
+        kwargs = holder.advance_frames_until.call_args.kwargs
+        assert kwargs["final_buttons"] == ["up"]
+        assert kwargs["final_touch_x"] == 120
+        assert kwargs["final_touch_y"] == 80
+
 
 # ---------------------------------------------------------------------------
 # Condition-checking unit tests (emulator-layer)
@@ -712,3 +728,68 @@ class TestAdvanceFramesUntilLoop:
         )
         keypad_calls = [c.args[0] for c in state.emu.input_keypad_update.call_args_list]
         assert all(mask == 0 for mask in keypad_calls)
+
+    def test_final_buttons_overrides_trailing_frame(self):
+        """Issue #12: final_buttons should be applied on the trailing render
+        frame instead of releasing all inputs, so chained calls hand off
+        without a 1-frame input gap."""
+        from melonds_mcp.constants import buttons_to_bitmask
+
+        state = self._make_state()
+        state.emu.memory_read_byte.return_value = 1  # triggers immediately
+
+        state.advance_frames_until(
+            max_frames=10,
+            conditions=[{"type": "value", "address": 0x100, "size": "byte",
+                         "operator": "==", "value": 1}],
+            buttons=["right"],
+            final_buttons=["up"],
+        )
+
+        keypad_calls = [c.args[0] for c in state.emu.input_keypad_update.call_args_list]
+        # Polling loop holds "right".
+        assert keypad_calls[0] == buttons_to_bitmask(["right"])
+        # Trailing frame holds "up", not 0.
+        assert keypad_calls[-1] == buttons_to_bitmask(["up"])
+
+    def test_final_buttons_same_as_polling_holds_input(self):
+        """Passing final_buttons=buttons restores pre-#10 behavior: the
+        polling input keeps being held through the trailing frame (useful
+        for confirmations or other continuous-input flows)."""
+        from melonds_mcp.constants import buttons_to_bitmask
+
+        state = self._make_state()
+        state.emu.memory_read_byte.return_value = 1
+
+        state.advance_frames_until(
+            max_frames=10,
+            conditions=[{"type": "value", "address": 0x100, "size": "byte",
+                         "operator": "==", "value": 1}],
+            buttons=["a"],
+            final_buttons=["a"],
+        )
+
+        a_mask = buttons_to_bitmask(["a"])
+        keypad_calls = [c.args[0] for c in state.emu.input_keypad_update.call_args_list]
+        assert all(mask == a_mask for mask in keypad_calls), (
+            f"every frame should hold A; got {[hex(m) for m in keypad_calls]}"
+        )
+
+    def test_final_touch_overrides_trailing_frame(self):
+        """final_touch_x/final_touch_y should drive the trailing frame's
+        touchscreen state."""
+        state = self._make_state()
+        state.emu.memory_read_byte.return_value = 1
+
+        state.advance_frames_until(
+            max_frames=10,
+            conditions=[{"type": "value", "address": 0x100, "size": "byte",
+                         "operator": "==", "value": 1}],
+            final_touch_x=120,
+            final_touch_y=80,
+        )
+
+        # Trailing frame should set a touch (120, 80), not release.
+        touch_calls = state.emu.input_set_touch_pos.call_args_list
+        assert touch_calls, "expected a touch call on the trailing frame"
+        assert touch_calls[-1].args == (120, 80)

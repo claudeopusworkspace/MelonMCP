@@ -494,6 +494,9 @@ def _tool_advance_frames_until(
     touch_x: int | None,
     touch_y: int | None,
     read_addresses: list[dict],
+    final_buttons: list[str] | None = None,
+    final_touch_x: int | None = None,
+    final_touch_y: int | None = None,
 ) -> dict[str, Any]:
     if max_frames < 1:
         raise ValueError("max_frames must be >= 1")
@@ -552,6 +555,13 @@ def _tool_advance_frames_until(
         if spec.get("size", "byte") not in valid_sizes:
             raise ValueError(f"read_addresses[{i}]: size must be one of {valid_sizes}")
 
+    final_buttons_arg = final_buttons if final_buttons else None
+    has_final_override = (
+        final_buttons_arg is not None
+        or final_touch_x is not None
+        or final_touch_y is not None
+    )
+
     result = holder.advance_frames_until(
         max_frames=max_frames,
         conditions=conditions,
@@ -560,17 +570,26 @@ def _tool_advance_frames_until(
         touch_x=touch_x,
         touch_y=touch_y,
         read_addresses=read_addresses or None,
+        final_buttons=final_buttons_arg,
+        final_touch_x=final_touch_x,
+        final_touch_y=final_touch_y,
     )
     frames_elapsed = result["frames_elapsed"]
     # advance_frames_until runs (frames_elapsed - 1) frames with the polling
-    # inputs held, then renders one trailing release frame. Mirror that split
-    # in the journal so the renderer replays inputs accurately.
+    # inputs held, then renders one trailing frame whose inputs are either
+    # released (default) or overridden via final_*. Mirror that split in the
+    # journal so the renderer replays inputs accurately.
     polling_frames = max(frames_elapsed - 1, 0)
     if polling_frames > 0:
         _journal_write(holder, "write_frames", count=polling_frames,
                        buttons=buttons or None, touch_x=touch_x, touch_y=touch_y)
-    _journal_write(holder, "write_frames", count=1, buttons=None,
-                   touch_x=None, touch_y=None)  # trailing release frame
+    if has_final_override:
+        _journal_write(holder, "write_frames", count=1,
+                       buttons=final_buttons_arg,
+                       touch_x=final_touch_x, touch_y=final_touch_y)
+    else:
+        _journal_write(holder, "write_frames", count=1, buttons=None,
+                       touch_x=None, touch_y=None)  # trailing release frame
     return result
 
 
@@ -1624,6 +1643,9 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
         touch_x: int | None = None,
         touch_y: int | None = None,
         read_addresses: list[dict] = [],
+        final_buttons: list[str] | None = None,
+        final_touch_x: int | None = None,
+        final_touch_y: int | None = None,
     ) -> dict[str, Any]:
         """Advance up to N frames, returning early when a memory condition is met.
 
@@ -1647,10 +1669,19 @@ def create_server(data_dir: Path | None = None) -> FastMCP:
             touch_x: Touchscreen X position (0-255).
             touch_y: Touchscreen Y position (0-191).
             read_addresses: Additional memory reads on return. Each: {"address": int, "size": "byte"|"short"|"long", "count": int}.
+            final_buttons: Buttons to press on the trailing render frame. By
+                default the trailing frame releases all inputs; setting this
+                (or final_touch_x/final_touch_y) overrides that single frame.
+                Useful for chaining direction-changing nav calls without a
+                1-frame input gap, or for keeping a button held across a
+                triggered state change.
+            final_touch_x: Touchscreen X for the trailing render frame.
+            final_touch_y: Touchscreen Y for the trailing render frame.
         """
         return _tool_advance_frames_until(
             holder, max_frames, conditions, poll_interval,
             buttons, touch_x, touch_y, read_addresses,
+            final_buttons, final_touch_x, final_touch_y,
         )
 
     @mcp.tool()
