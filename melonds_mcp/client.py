@@ -86,12 +86,18 @@ class EmulatorClient:
         touch_x: int | None = None,
         touch_y: int | None = None,
         read_addresses: list[dict] | None = None,
+        final_buttons: list[str] | None = None,
+        final_touch_x: int | None = None,
+        final_touch_y: int | None = None,
     ) -> dict:
         """Advance up to max_frames, returning early when a memory condition is met.
 
         Runs the poll loop internally at full emulator speed, eliminating
         round-trip overhead. Returns dict with triggered, condition_index,
         frames_elapsed, total_frame, and optional reads.
+
+        final_buttons/final_touch_x/final_touch_y override the trailing render
+        frame's inputs. Default (unset) releases all inputs on that frame.
         """
         params: dict[str, Any] = {
             "max_frames": max_frames,
@@ -106,6 +112,12 @@ class EmulatorClient:
             params["touch_y"] = touch_y
         if read_addresses:
             params["read_addresses"] = read_addresses
+        if final_buttons is not None:
+            params["final_buttons"] = final_buttons
+        if final_touch_x is not None:
+            params["final_touch_x"] = final_touch_x
+        if final_touch_y is not None:
+            params["final_touch_y"] = final_touch_y
         return self._call("advance_frames_until", **params)
 
     def advance_frame(self, buttons: list[str] | None = None,

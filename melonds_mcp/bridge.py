@@ -109,17 +109,34 @@ class BridgeServer:
         touch_x: int | None = None,
         touch_y: int | None = None,
         read_addresses: list[dict] | None = None,
+        final_buttons: list[str] | None = None,
+        final_touch_x: int | None = None,
+        final_touch_y: int | None = None,
     ) -> dict:
-        result = self._holder.advance_frames_until(
-            max_frames, conditions, poll_interval, buttons, touch_x, touch_y, read_addresses,
+        has_final_override = (
+            final_buttons is not None
+            or final_touch_x is not None
+            or final_touch_y is not None
         )
-        # Mirror the trailing release frame in the journal (see server.py).
+        result = self._holder.advance_frames_until(
+            max_frames, conditions, poll_interval, buttons, touch_x, touch_y,
+            read_addresses,
+            final_buttons=final_buttons,
+            final_touch_x=final_touch_x,
+            final_touch_y=final_touch_y,
+        )
+        # Mirror the trailing frame in the journal (see server.py).
         polling_frames = max(result["frames_elapsed"] - 1, 0)
         if polling_frames > 0:
             self._journal_write("write_frames", count=polling_frames,
                                 buttons=buttons, touch_x=touch_x, touch_y=touch_y)
-        self._journal_write("write_frames", count=1, buttons=None,
-                            touch_x=None, touch_y=None)  # trailing release frame
+        if has_final_override:
+            self._journal_write("write_frames", count=1,
+                                buttons=final_buttons,
+                                touch_x=final_touch_x, touch_y=final_touch_y)
+        else:
+            self._journal_write("write_frames", count=1, buttons=None,
+                                touch_x=None, touch_y=None)  # trailing release frame
         return result
 
     def _advance_frame(self, buttons: list[str] | None = None,
